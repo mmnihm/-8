@@ -1,0 +1,254 @@
+import http from "node:http";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+const TOKEN = process.env.BOT_TOKEN;
+const ADMIN_IDS = new Set((process.env.ADMIN_IDS || "").split(",").map(x => x.trim()).filter(Boolean));
+const PORT = Number(process.env.PORT || 3000);
+const DATA_DIR = process.env.DATA_DIR || "./data";
+const DATA_FILE = path.join(DATA_DIR, "data.json");
+const API = TOKEN ? `https://api.telegram.org/bot${TOKEN}` : "";
+
+const DEFAULT_LINKS = {
+  main: process.env.MAIN_CHANNEL_URL || "",
+  backup: process.env.BACKUP_CHANNEL_URL || "",
+  contact: process.env.CONTACT_URL || "",
+  status: process.env.STATUS_URL || ""
+};
+
+let data = { links: { ...DEFAULT_LINKS }, users: [], offset: 0, startedAt: Date.now() };
+let polling = false;
+let saveQueue = Promise.resolve();
+
+function isAdmin(id) {
+  return ADMIN_IDS.has(String(id));
+}
+function safeText(value, max = 3500) {
+  return String(value ?? "").slice(0, max);
+}
+function validUrl(value) {
+  try {
+    const u = new URL(value);
+    return ["https:", "http:", "tg:"].includes(u.protocol);
+  } catch {
+    return false;
+  }
+}
+async function loadData() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  try {
+    const parsed = JSON.parse(await fs.readFile(DATA_FILE, "utf8"));
+    data = {
+      links: { ...DEFAULT_LINKS, ...(parsed.links || {}) },
+      users: Array.isArray(parsed.users) ? parsed.users : [],
+      offset: Number(parsed.offset || 0),
+      startedAt: Number(parsed.startedAt || Date.now())
+    };
+  } catch (e) {
+    if (e.code !== "ENOENT") console.error("Data file could not be read:", e.message);
+    await saveData();
+  }
+}
+function saveData() {
+  saveQueue = saveQueue.then(async () => {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    const tmp = DATA_FILE + ".tmp";
+    await fs.writeFile(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    await fs.rename(tmp, DATA_FILE);
+  }).catch(e => console.error("Save failed:", e.message));
+  return saveQueue;
+}
+async function telegram(method, payload = {}) {
+  const response = await fetch(`${API}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(35000)
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.ok) {
+    const error = new Error(result.description || `Telegram API HTTP ${response.status}`);
+    error.code = result.error_code || response.status;
+    error.retryAfter = result.parameters?.retry_after || 0;
+    throw error;
+  }
+  return result.result;
+}
+function keyboard() {
+  const rows = [];
+  const add = (label, key) => {
+    if (data.links[key] && validUrl(data.links[key])) rows.push([{ text: label, url: data.links[key] }]);
+  };
+  add("📢 官方频道", "main");
+  add("🛟 备用频道", "backup");
+  add("👩‍💻 联系客服", "contact");
+  add("📡 服务状态", "status");
+  return { inline_keyboard: rows };
+}
+async function sendMessage(chatId, text, extra = {}) {
+  return telegram("sendMessage", {
+    chat_id: chatId,
+    text: safeText(text),
+    disable_web_page_preview: true,
+    ...extra
+  });
+}
+function helpText() {
+  return [
+    "🛟 防失联服务中心",
+    "",
+    "如果原频道或机器人无法访问，请使用下方备用入口，或联系管理员。",
+    "建议先加入备用频道，以便在入口变更时收到公告。",
+    "",
+    "需要帮助可点击「联系客服」。"
+  ].join("\n");
+}
+function adminHelp() {
+  return [
+    "管理员命令：",
+    "/links — 查看当前入口",
+    "/setlink main https://... — 设置官方频道",
+    "/setlink backup https://... — 设置备用频道",
+    "/setlink contact https://... — 设置客服入口",
+    "/setlink status https://... — 设置状态页",
+    "/setlink main off — 清除某个入口",
+    "/announce 公告内容 — 通知已启动机器人的用户",
+    "/stats — 查看用户数和运行时间",
+    "/help — 查看命令"
+  ].join("\n");
+}
+async function handleUpdate(update) {
+  const msg = update.message;
+  if (!msg?.chat || !msg?.from || typeof msg.text !== "string") return;
+  const chatId = msg.chat.id;
+  const userId = String(msg.from.id);
+  if (msg.chat.type === "private" && !data.users.includes(userId)) {
+    data.users.push(userId);
+    await saveData();
+  }
+  const text = msg.text.trim();
+  const [command = "", ...rest] = text.split(/\s+/);
+  const cmd = command.split("@")[0].toLowerCase();
+
+  if (cmd === "/start" || cmd === "/links") {
+    await sendMessage(chatId, helpText(), { reply_markup: keyboard() });
+    return;
+  }
+  if (cmd === "/help") {
+    await sendMessage(chatId, isAdmin(userId) ? adminHelp() : helpText(), {
+      reply_markup: isAdmin(userId) ? undefined : keyboard()
+    });
+    return;
+  }
+  if (!isAdmin(userId)) {
+    if (cmd.startsWith("/")) await sendMessage(chatId, "此命令仅供管理员使用。", { reply_markup: keyboard() });
+    return;
+  }
+  if (cmd === "/setlink") {
+    const key = (rest[0] || "").toLowerCase();
+    const value = rest.slice(1).join(" ").trim();
+    if (!["main", "backup", "contact", "status"].includes(key) || !value) {
+      await sendMessage(chatId, "用法：/setlink main|backup|contact|status https://...\n清除入口：/setlink backup off");
+      return;
+    }
+    if (value.toLowerCase() === "off") data.links[key] = "";
+    else if (validUrl(value)) data.links[key] = value;
+    else {
+      await sendMessage(chatId, "链接格式无效，请使用完整的 https://、http:// 或 tg:// 链接。");
+      return;
+    }
+    await saveData();
+    await sendMessage(chatId, `✅ 已更新 ${key} 入口。\n用户下次打开菜单即可看到最新链接。`, { reply_markup: keyboard() });
+    return;
+  }
+  if (cmd === "/stats") {
+    const uptime = Math.floor((Date.now() - data.startedAt) / 1000);
+    await sendMessage(chatId, `📊 运行状态\n已登记用户：${data.users.length}\n运行时间：${Math.floor(uptime / 3600)} 小时 ${Math.floor((uptime % 3600) / 60)} 分钟\n入口：${Object.values(data.links).filter(Boolean).length} 个`);
+    return;
+  }
+  if (cmd === "/announce") {
+    const announcement = rest.join(" ").trim();
+    if (!announcement) {
+      await sendMessage(chatId, "用法：/announce 要发送的公告内容");
+      return;
+    }
+    const recipients = [...data.users];
+    let sent = 0, failed = 0, blocked = 0;
+    await sendMessage(chatId, `📣 开始发送，目标 ${recipients.length} 位用户。发送期间请勿关闭机器人。`);
+    for (const recipient of recipients) {
+      try {
+        await sendMessage(recipient, `📣 防失联公告\n\n${announcement}`, { reply_markup: keyboard() });
+        sent++;
+      } catch (e) {
+        failed++;
+        if ([403, 400].includes(Number(e.code))) {
+          blocked++;
+          data.users = data.users.filter(id => id !== recipient);
+        }
+        if (e.retryAfter) await new Promise(resolve => setTimeout(resolve, (e.retryAfter + 1) * 1000));
+      }
+      await new Promise(resolve => setTimeout(resolve, 40));
+    }
+    await saveData();
+    await sendMessage(chatId, `✅ 通知任务结束\n成功：${sent}\n失败：${failed}\n已清理不可达用户：${blocked}`);
+    return;
+  }
+  await sendMessage(chatId, adminHelp());
+}
+async function poll() {
+  if (polling) return;
+  polling = true;
+  let delay = 1000;
+  while (true) {
+    try {
+      const updates = await telegram("getUpdates", {
+        offset: data.offset,
+        timeout: 25,
+        allowed_updates: ["message"]
+      });
+      delay = 1000;
+      for (const update of updates) {
+        data.offset = update.update_id + 1;
+        await saveData();
+        try {
+          await handleUpdate(update);
+        } catch (e) {
+          console.error("Update handling failed:", e.message);
+        }
+      }
+    } catch (e) {
+      console.error("Telegram polling failed:", e.message);
+      if (e.retryAfter) delay = (e.retryAfter + 1) * 1000;
+      else delay = Math.min(delay * 2, 30000);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+const server = http.createServer((req, res) => {
+  if (req.url === "/health" || req.url === "/") {
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, service: "telegram-anti-loss-bot", uptimeSeconds: Math.floor(process.uptime()) }));
+    return;
+  }
+  res.writeHead(404);
+  res.end("Not found");
+});
+server.listen(PORT, "0.0.0.0", async () => {
+  console.log(`Health endpoint listening on port ${PORT}`);
+  if (!TOKEN) {
+    console.error("BOT_TOKEN is missing. Add it in the hosting environment variables.");
+    return;
+  }
+  if (!ADMIN_IDS.size) console.warn("ADMIN_IDS is empty; admin commands are disabled until configured.");
+  await loadData();
+  try {
+    const me = await telegram("getMe");
+    console.log(`Bot connected: @${me.username}`);
+  } catch (e) {
+    console.error("Telegram token check failed:", e.message);
+    process.exitCode = 1;
+    return;
+  }
+  poll().catch(e => console.error("Polling stopped:", e.message));
+});
+process.on("unhandledRejection", e => console.error("Unhandled rejection:", e?.message || e));
