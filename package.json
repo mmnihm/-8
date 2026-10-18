@@ -1,0 +1,13 @@
+{
+  "name": "telegram-anti-loss-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Independent Telegram anti-loss-of-contact bot",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
