@@ -93,7 +93,7 @@ function adminKeyboard() {
       [{ text: "📢 设置官方频道" }, { text: "🛟 设置备用频道" }],
       [{ text: "👩‍💻 设置客服联系" }, { text: "📡 设置服务状态" }],
       [{ text: "📣 发送广播公告" }, { text: "👁️ 预览用户菜单" }],
-      [{ text: "❌ 取消当前设置" }]
+      [{ text: "▶️ 开始" }, { text: "❌ 取消当前设置" }]
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
@@ -210,6 +210,13 @@ async function handleUpdate(update) {
     await saveData();
   }
   const text = msg.text.trim();
+
+  if (isAdmin(userId) && text === "▶️ 开始") {
+    pendingLinkSetup.delete(userId);
+    pendingBroadcast.delete(userId);
+    await sendMessage(chatId, helpText(), { reply_markup: adminKeyboard() });
+    return;
+  }
 
   // 固定底部管理员键盘：先识别按钮，再处理正在等待的链接或公告。
   const adminActions = {
