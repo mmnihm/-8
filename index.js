@@ -17,11 +17,12 @@ const DEFAULT_LINKS = {
   status: process.env.STATUS_URL || ""
 };
 
-let data = { links: { ...DEFAULT_LINKS }, users: [], offset: 0, startedAt: Date.now() };
+let data = { links: { ...DEFAULT_LINKS }, customButtons: [], users: [], offset: 0, startedAt: Date.now() };
 let polling = false;
 let saveQueue = Promise.resolve();
 const pendingLinkSetup = new Map();
 const pendingBroadcast = new Set();
+const pendingButtonSetup = new Map();
 
 function isAdmin(id) {
   return ADMIN_IDS.has(String(id));
@@ -43,6 +44,7 @@ async function loadData() {
     const parsed = JSON.parse(await fs.readFile(DATA_FILE, "utf8"));
     data = {
       links: { ...DEFAULT_LINKS, ...(parsed.links || {}) },
+      customButtons: Array.isArray(parsed.customButtons) ? parsed.customButtons.filter(b => b && /^[a-zA-Z0-9_-]{1,16}$/.test(String(b.id)) && typeof b.label === "string" && typeof b.url === "string") : [],
       users: Array.isArray(parsed.users) ? parsed.users : [],
       offset: Number(parsed.offset || 0),
       startedAt: Number(parsed.startedAt || Date.now())
@@ -86,6 +88,9 @@ function keyboard() {
   add("🛟 备用频道", "backup");
   add("👩‍💻 联系客服", "contact");
   add("🔗 外部状态页", "status");
+  for (const button of (data.customButtons || [])) {
+    if (button.label && validUrl(button.url)) rows.push([{ text: button.label, url: button.url }]);
+  }
   rows.push([{ text: "📡 服务器状态", callback_data: "serverstatus" }]);
   return { inline_keyboard: rows };
 }
@@ -95,7 +100,8 @@ function adminKeyboard() {
       [{ text: "📢 设置官方频道" }, { text: "🛟 设置备用频道" }],
       [{ text: "👩‍💻 设置客服联系" }, { text: "📡 查看服务器状态" }],
       [{ text: "🔗 设置外部状态页" }],
-      [{ text: "📣 发送广播公告" }, { text: "👁️ 预览用户菜单" }],
+      [{ text: "🔘 按钮管理" }, { text: "📣 发送广播公告" }],
+      [{ text: "👁️ 预览用户菜单" }],
       [{ text: "▶️ 开始" }, { text: "❌ 取消当前设置" }]
     ],
     resize_keyboard: true,
@@ -148,11 +154,8 @@ async function handleCallback(update) {
   if (!query) return false;
   const userId = String(query.from?.id || "");
   const chatId = query.message?.chat?.id;
-  if (!isAdmin(userId)) {
-    await telegram("answerCallbackQuery", { callback_query_id: query.id, text: "仅管理员可使用此设置菜单。", show_alert: true });
-    return true;
-  }
   const action = String(query.data || "");
+
   if (action === "serverstatus") {
     await telegram("answerCallbackQuery", { callback_query_id: query.id, text: "正在读取服务器状态…" });
     if (chatId) await sendMessage(chatId, await serverStatusText(), { reply_markup: keyboard() });
@@ -164,6 +167,33 @@ async function handleCallback(update) {
   }
   await telegram("answerCallbackQuery", { callback_query_id: query.id });
   if (!chatId) return true;
+
+  if (action === "buttons:manage") { await showButtonManager(chatId); return true; }
+  if (action === "buttons:add") {
+    pendingButtonSetup.set(userId, { phase: "label" });
+    pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId);
+    await sendMessage(chatId, "请发送新按钮的名称（最多 32 个字符）。\n下一步再发送对应的网址。\n发送 /cancel 可取消。", { reply_markup: adminKeyboard() });
+    return true;
+  }
+  if (action.startsWith("buttons:edit:")) {
+    const id = action.slice("buttons:edit:".length);
+    const button = (data.customButtons || []).find(b => b.id === id);
+    if (!button) { await sendMessage(chatId, "找不到这个按钮，它可能已被删除。"); return true; }
+    pendingButtonSetup.set(userId, { phase: "editLabel", id });
+    pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId);
+    await sendMessage(chatId, `请发送按钮「${button.label}」的新名称。\n发送 /cancel 可取消。`, { reply_markup: adminKeyboard() });
+    return true;
+  }
+  if (action.startsWith("buttons:delete:")) {
+    const id = action.slice("buttons:delete:".length);
+    const button = (data.customButtons || []).find(b => b.id === id);
+    if (!button) { await sendMessage(chatId, "这个按钮已经不存在。"); return true; }
+    data.customButtons = data.customButtons.filter(b => b.id !== id);
+    await saveData();
+    await sendMessage(chatId, `✅ 已删除按钮「${button.label}」。`, { reply_markup: adminKeyboard() });
+    await showButtonManager(chatId);
+    return true;
+  }
   if (action.startsWith("setlink:")) {
     const key = action.slice("setlink:".length);
     if (!["main", "backup", "contact", "status"].includes(key)) return true;
@@ -177,8 +207,7 @@ async function handleCallback(update) {
     return true;
   }
   if (action === "cancelsetup") {
-    pendingLinkSetup.delete(userId);
-    pendingBroadcast.delete(userId);
+    pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
     await sendMessage(chatId, "已取消当前设置。", { reply_markup: adminKeyboard() });
     return true;
   }
@@ -189,7 +218,19 @@ async function handleCallback(update) {
   }
   return true;
 }
-async function sendMessage(chatId, text, extra = {}) {
+
+async function showButtonManager(chatId) {
+  const rows = [[{ text: "➕ 添加按钮", callback_data: "buttons:add" }]];
+  for (const button of (data.customButtons || [])) rows.push([
+    { text: `✏️ ${button.label}`.slice(0, 60), callback_data: `buttons:edit:${button.id}` },
+    { text: "🗑 删除", callback_data: `buttons:delete:${button.id}` }
+  ]);
+  await sendMessage(chatId,
+    "🔘 自定义按钮管理\n\n添加：设置按钮名称和网址。\n修改：可以修改名称及网址。\n删除：立即从用户菜单移除。\n\n自定义按钮会显示在用户入口菜单中，重启后仍会保留。",
+    { reply_markup: { inline_keyboard: rows } });
+}
+
+function sendMessage(chatId, text, extra = {}) {
   return telegram("sendMessage", {
     chat_id: chatId,
     text: safeText(text),
@@ -281,6 +322,11 @@ async function handleUpdate(update) {
     await sendMessage(chatId, `请发送「${linkLabel(key)}」的新链接。\n支持 https://、http:// 或 tg:// 链接。\n发送 /cancel 或点击「❌ 取消当前设置」可取消。\n\n当前链接：${data.links[key] || "尚未设置"}`, { reply_markup: adminKeyboard() });
     return;
   }
+  if (isAdmin(userId) && text === "🔘 按钮管理") {
+    pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
+    await showButtonManager(chatId);
+    return;
+  }
   if (isAdmin(userId) && text === "📡 查看服务器状态") {
     pendingLinkSetup.delete(userId);
     pendingBroadcast.delete(userId);
@@ -303,8 +349,50 @@ async function handleUpdate(update) {
   if (isAdmin(userId) && text === "❌ 取消当前设置") {
     pendingLinkSetup.delete(userId);
     pendingBroadcast.delete(userId);
+    pendingButtonSetup.delete(userId);
     await sendMessage(chatId, "已取消当前操作。管理员按钮仍固定在聊天底部。", { reply_markup: adminKeyboard() });
     return;
+  }
+
+  if (pendingButtonSetup.has(userId)) {
+    const setup = pendingButtonSetup.get(userId);
+    if (text.toLowerCase() === "/cancel") {
+      pendingButtonSetup.delete(userId);
+      await sendMessage(chatId, "已取消按钮设置。", { reply_markup: adminKeyboard() });
+      return;
+    }
+    if (!isAdmin(userId)) { pendingButtonSetup.delete(userId); return; }
+    if (setup.phase === "label" || setup.phase === "editLabel") {
+      const label = text.trim();
+      if (!label || label.startsWith("/") || label.length > 32) {
+        await sendMessage(chatId, "按钮名称不能为空，且最多 32 个字符。请重新发送，或 /cancel 取消。");
+        return;
+      }
+      setup.label = label;
+      setup.phase = setup.phase === "editLabel" ? "editUrl" : "url";
+      pendingButtonSetup.set(userId, setup);
+      await sendMessage(chatId, "请发送这个按钮要打开的网址（https://、http:// 或 tg://）。");
+      return;
+    }
+    if (setup.phase === "url" || setup.phase === "editUrl") {
+      const url = text.trim();
+      if (!validUrl(url)) {
+        await sendMessage(chatId, "❌ 网址格式不正确。请发送完整网址（https://、http:// 或 tg://），或 /cancel 取消。");
+        return;
+      }
+      if (setup.phase === "url") {
+        const id = Date.now().toString(36);
+        data.customButtons.push({ id, label: setup.label, url });
+      } else {
+        const button = data.customButtons.find(b => b.id === setup.id);
+        if (button) { button.label = setup.label; button.url = url; }
+      }
+      pendingButtonSetup.delete(userId);
+      await saveData();
+      await sendMessage(chatId, "✅ 按钮已保存，用户菜单已更新。", { reply_markup: adminKeyboard() });
+      await showButtonManager(chatId);
+      return;
+    }
   }
 
   if (pendingBroadcast.has(userId)) {
