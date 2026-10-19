@@ -81,26 +81,29 @@ async function telegram(method, payload = {}) {
 }
 function keyboard() {
   const rows = [];
-  const add = (label, key) => {
-    if (data.links[key] && validUrl(data.links[key])) rows.push([{ text: label, url: data.links[key] }]);
+  let linkRow = [];
+  const add = (label, url) => {
+    if (!url || !validUrl(url)) return;
+    linkRow.push({ text: label, url });
+    if (linkRow.length === 2) {
+      rows.push(linkRow);
+      linkRow = [];
+    }
   };
-  add("📢 官方频道", "main");
-  add("🛟 备用频道", "backup");
-  add("👩‍💻 联系客服", "contact");
-  add("🔗 外部状态页", "status");
-  for (const button of (data.customButtons || [])) {
-    if (button.label && validUrl(button.url)) rows.push([{ text: button.label, url: button.url }]);
-  }
+  add("📢 官方频道", data.links.main);
+  add("🛟 备用频道", data.links.backup);
+  add("👩‍💻 联系客服", data.links.contact);
+  add("🔗 外部状态页", data.links.status);
+  for (const button of (data.customButtons || [])) add(button.label, button.url);
+  if (linkRow.length) rows.push(linkRow);
   rows.push([{ text: "📡 服务器状态", callback_data: "serverstatus" }]);
   return { inline_keyboard: rows };
 }
 function adminKeyboard() {
   return {
     keyboard: [
-      [{ text: "📢 设置官方频道" }, { text: "🛟 设置备用频道" }],
-      [{ text: "👩‍💻 设置客服联系" }, { text: "📡 查看服务器状态" }],
-      [{ text: "🔗 设置外部状态页" }],
-      [{ text: "🔘 按钮管理" }, { text: "📣 发送广播公告" }],
+      [{ text: "🔗 入口设置" }, { text: "🔘 按钮管理" }],
+      [{ text: "📣 发送广播公告" }, { text: "📡 查看服务器状态" }],
       [{ text: "👁️ 预览用户菜单" }],
       [{ text: "▶️ 开始" }, { text: "❌ 取消当前设置" }]
     ],
@@ -309,17 +312,12 @@ async function handleUpdate(update) {
   }
 
   // 固定底部管理员键盘：先识别按钮，再处理正在等待的链接或公告。
-  const adminActions = {
-    "📢 设置官方频道": "main",
-    "🛟 设置备用频道": "backup",
-    "👩‍💻 设置客服联系": "contact",
-    "🔗 设置外部状态页": "status"
-  };
-  if (isAdmin(userId) && Object.prototype.hasOwnProperty.call(adminActions, text)) {
-    pendingBroadcast.delete(userId);
-    const key = adminActions[text];
-    pendingLinkSetup.set(userId, key);
-    await sendMessage(chatId, `请发送「${linkLabel(key)}」的新链接。\n支持 https://、http:// 或 tg:// 链接。\n发送 /cancel 或点击「❌ 取消当前设置」可取消。\n\n当前链接：${data.links[key] || "尚未设置"}`, { reply_markup: adminKeyboard() });
+  if (isAdmin(userId) && text === "🔗 入口设置") {
+    pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
+    await sendMessage(chatId, "🔗 入口设置\\n请选择要修改的入口：", { reply_markup: { inline_keyboard: [
+      [{ text: "📢 官方频道", callback_data: "setlink:main" }, { text: "🛟 备用频道", callback_data: "setlink:backup" }],
+      [{ text: "👩‍💻 联系客服", callback_data: "setlink:contact" }, { text: "🔗 外部状态页", callback_data: "setlink:status" }]
+    ] } });
     return;
   }
   if (isAdmin(userId) && text === "🔘 按钮管理") {
