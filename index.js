@@ -88,15 +88,17 @@ function keyboard() {
   return { inline_keyboard: rows };
 }
 function adminKeyboard() {
-  return { inline_keyboard: [
-    [{ text: "📢 设置官方频道", callback_data: "setlink:main" }],
-    [{ text: "🛟 设置备用频道", callback_data: "setlink:backup" }],
-    [{ text: "👩‍💻 设置客服联系", callback_data: "setlink:contact" }],
-    [{ text: "📡 设置服务状态", callback_data: "setlink:status" }],
-    [{ text: "📣 发送广播公告", callback_data: "broadcast" }],
-    [{ text: "👁️ 预览用户菜单", callback_data: "preview" }],
-    [{ text: "❌ 取消当前设置", callback_data: "cancelsetup" }]
-  ] };
+  return {
+    keyboard: [
+      [{ text: "📢 设置官方频道" }, { text: "🛟 设置备用频道" }],
+      [{ text: "👩‍💻 设置客服联系" }, { text: "📡 设置服务状态" }],
+      [{ text: "📣 发送广播公告" }, { text: "👁️ 预览用户菜单" }],
+      [{ text: "❌ 取消当前设置" }]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+    is_persistent: true
+  };
 }
 function linkLabel(key) {
   return ({ main: "官方频道", backup: "备用频道", contact: "客服联系", status: "服务状态" })[key] || key;
@@ -208,6 +210,41 @@ async function handleUpdate(update) {
     await saveData();
   }
   const text = msg.text.trim();
+
+  // 固定底部管理员键盘：先识别按钮，再处理正在等待的链接或公告。
+  const adminActions = {
+    "📢 设置官方频道": "main",
+    "🛟 设置备用频道": "backup",
+    "👩‍💻 设置客服联系": "contact",
+    "📡 设置服务状态": "status"
+  };
+  if (isAdmin(userId) && Object.prototype.hasOwnProperty.call(adminActions, text)) {
+    pendingBroadcast.delete(userId);
+    const key = adminActions[text];
+    pendingLinkSetup.set(userId, key);
+    await sendMessage(chatId, `请发送「${linkLabel(key)}」的新链接。\n支持 https://、http:// 或 tg:// 链接。\n发送 /cancel 或点击「❌ 取消当前设置」可取消。\n\n当前链接：${data.links[key] || "尚未设置"}`, { reply_markup: adminKeyboard() });
+    return;
+  }
+  if (isAdmin(userId) && text === "📣 发送广播公告") {
+    pendingLinkSetup.delete(userId);
+    pendingBroadcast.add(userId);
+    await sendMessage(chatId, "📣 请直接发送要广播的公告内容，可以分多行。\n发送 /cancel 或点击「❌ 取消当前设置」可取消。\n\n公告会发送给已启动过机器人的用户。", { reply_markup: adminKeyboard() });
+    return;
+  }
+  if (isAdmin(userId) && text === "👁️ 预览用户菜单") {
+    pendingLinkSetup.delete(userId);
+    pendingBroadcast.delete(userId);
+    await sendMessage(chatId, "这是用户入口菜单预览：", { reply_markup: keyboard() });
+    await sendMessage(chatId, "管理员操作按钮已固定在聊天底部。", { reply_markup: adminKeyboard() });
+    return;
+  }
+  if (isAdmin(userId) && text === "❌ 取消当前设置") {
+    pendingLinkSetup.delete(userId);
+    pendingBroadcast.delete(userId);
+    await sendMessage(chatId, "已取消当前操作。管理员按钮仍固定在聊天底部。", { reply_markup: adminKeyboard() });
+    return;
+  }
+
   if (pendingBroadcast.has(userId)) {
     if (text.toLowerCase() === "/cancel") {
       pendingBroadcast.delete(userId);
@@ -248,7 +285,7 @@ async function handleUpdate(update) {
   const cmd = command.split("@")[0].toLowerCase();
 
   if (cmd === "/start" || cmd === "/links") {
-    await sendMessage(chatId, helpText(), { reply_markup: keyboard() });
+    await sendMessage(chatId, helpText(), { reply_markup: isAdmin(userId) && cmd === "/start" ? adminKeyboard() : keyboard() });
     return;
   }
   if (cmd === "/admin") {
@@ -256,7 +293,7 @@ async function handleUpdate(update) {
       await sendMessage(chatId, "此设置菜单仅供管理员使用。");
       return;
     }
-    await sendMessage(chatId, "⚙️ 防失联机器人管理菜单\n点击要修改的入口，再直接发送新链接。", { reply_markup: adminKeyboard() });
+    await sendMessage(chatId, "⚙️ 防失联机器人管理菜单\n请使用聊天底部固定键盘操作；点击设置按钮后直接发送链接。", { reply_markup: adminKeyboard() });
     return;
   }
   if (cmd === "/help") {
