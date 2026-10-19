@@ -1,6 +1,7 @@
 import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 
 const TOKEN = process.env.BOT_TOKEN;
 const ADMIN_IDS = new Set((process.env.ADMIN_IDS || "").split(",").map(x => x.trim()).filter(Boolean));
@@ -84,14 +85,14 @@ function keyboard() {
   add("📢 官方频道", "main");
   add("🛟 备用频道", "backup");
   add("👩‍💻 联系客服", "contact");
-  add("📡 服务状态", "status");
+  rows.push([{ text: "📡 服务器状态", callback_data: "serverstatus" }]);
   return { inline_keyboard: rows };
 }
 function adminKeyboard() {
   return {
     keyboard: [
       [{ text: "📢 设置官方频道" }, { text: "🛟 设置备用频道" }],
-      [{ text: "👩‍💻 设置客服联系" }, { text: "📡 设置服务状态" }],
+      [{ text: "👩‍💻 设置客服联系" }, { text: "📡 查看服务器状态" }],
       [{ text: "📣 发送广播公告" }, { text: "👁️ 预览用户菜单" }],
       [{ text: "▶️ 开始" }, { text: "❌ 取消当前设置" }]
     ],
@@ -99,6 +100,43 @@ function adminKeyboard() {
     one_time_keyboard: false,
     is_persistent: true
   };
+}
+async function serverStatusText() {
+  const uptime = Math.floor(process.uptime());
+  const fmtDuration = seconds => {
+    const d = Math.floor(seconds / 86400);
+    const h = Math.floor((seconds % 86400) / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return `${d} 天 ${h} 小时 ${m} 分钟`;
+  };
+  const total = os.totalmem();
+  const free = os.freemem();
+  const usedPct = total ? ((total - free) / total * 100).toFixed(1) : "未知";
+  const load = os.loadavg();
+  let diskLine = "数据盘空间：当前运行环境不支持读取";
+  try {
+    const stat = await fs.statfs(DATA_DIR);
+    const totalBytes = Number(stat.blocks) * Number(stat.bsize);
+    const freeBytes = Number(stat.bavail) * Number(stat.bsize);
+    const usedBytes = Math.max(0, totalBytes - freeBytes);
+    const gb = n => (n / (1024 ** 3)).toFixed(2);
+    const diskPct = totalBytes ? (usedBytes / totalBytes * 100).toFixed(1) : "未知";
+    diskLine = `数据目录所在磁盘：已用 ${gb(usedBytes)} GB / ${gb(totalBytes)} GB（${diskPct}%），剩余 ${gb(freeBytes)} GB`;
+  } catch {}
+  const gb = n => (n / (1024 ** 3)).toFixed(2);
+  return [
+    "📡 服务器运行状态",
+    "",
+    "🟢 机器人进程：运行中",
+    `⏱️ 机器人运行时间：${fmtDuration(uptime)}`,
+    `🧠 系统内存：已用 ${gb(total - free)} GB / ${gb(total)} GB（${usedPct}%）`,
+    `⚙️ CPU 负载（1/5/15 分钟）：${load.map(n => n.toFixed(2)).join(" / ")}（核心数 ${os.cpus().length}）`,
+    diskLine,
+    "",
+    `🕒 更新时间：${new Date().toISOString().replace("T", " ").slice(0, 19)} UTC`,
+    "",
+    "说明：容器部署时，显示的是当前运行环境可读取的指标；磁盘为数据目录所在文件系统。"
+  ].join("\n");
 }
 function linkLabel(key) {
   return ({ main: "官方频道", backup: "备用频道", contact: "客服联系", status: "服务状态" })[key] || key;
@@ -113,6 +151,15 @@ async function handleCallback(update) {
     return true;
   }
   const action = String(query.data || "");
+  if (action === "serverstatus") {
+    await telegram("answerCallbackQuery", { callback_query_id: query.id, text: "正在读取服务器状态…" });
+    if (chatId) await sendMessage(chatId, await serverStatusText(), { reply_markup: keyboard() });
+    return true;
+  }
+  if (!isAdmin(userId)) {
+    await telegram("answerCallbackQuery", { callback_query_id: query.id, text: "仅管理员可使用此设置菜单。", show_alert: true });
+    return true;
+  }
   await telegram("answerCallbackQuery", { callback_query_id: query.id });
   if (!chatId) return true;
   if (action.startsWith("setlink:")) {
@@ -222,14 +269,19 @@ async function handleUpdate(update) {
   const adminActions = {
     "📢 设置官方频道": "main",
     "🛟 设置备用频道": "backup",
-    "👩‍💻 设置客服联系": "contact",
-    "📡 设置服务状态": "status"
+    "👩‍💻 设置客服联系": "contact"
   };
   if (isAdmin(userId) && Object.prototype.hasOwnProperty.call(adminActions, text)) {
     pendingBroadcast.delete(userId);
     const key = adminActions[text];
     pendingLinkSetup.set(userId, key);
     await sendMessage(chatId, `请发送「${linkLabel(key)}」的新链接。\n支持 https://、http:// 或 tg:// 链接。\n发送 /cancel 或点击「❌ 取消当前设置」可取消。\n\n当前链接：${data.links[key] || "尚未设置"}`, { reply_markup: adminKeyboard() });
+    return;
+  }
+  if (isAdmin(userId) && text === "📡 查看服务器状态") {
+    pendingLinkSetup.delete(userId);
+    pendingBroadcast.delete(userId);
+    await sendMessage(chatId, await serverStatusText(), { reply_markup: adminKeyboard() });
     return;
   }
   if (isAdmin(userId) && text === "📣 发送广播公告") {
