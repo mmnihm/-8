@@ -19,6 +19,7 @@ const DEFAULT_LINKS = {
 let data = { links: { ...DEFAULT_LINKS }, users: [], offset: 0, startedAt: Date.now() };
 let polling = false;
 let saveQueue = Promise.resolve();
+const pendingLinkSetup = new Map();
 
 function isAdmin(id) {
   return ADMIN_IDS.has(String(id));
@@ -85,6 +86,50 @@ function keyboard() {
   add("📡 服务状态", "status");
   return { inline_keyboard: rows };
 }
+function adminKeyboard() {
+  return { inline_keyboard: [
+    [{ text: "📢 设置官方频道", callback_data: "setlink:main" }],
+    [{ text: "🛟 设置备用频道", callback_data: "setlink:backup" }],
+    [{ text: "👩‍💻 设置客服联系", callback_data: "setlink:contact" }],
+    [{ text: "📡 设置服务状态", callback_data: "setlink:status" }],
+    [{ text: "👁️ 预览用户菜单", callback_data: "preview" }],
+    [{ text: "❌ 取消当前设置", callback_data: "cancelsetup" }]
+  ] };
+}
+function linkLabel(key) {
+  return ({ main: "官方频道", backup: "备用频道", contact: "客服联系", status: "服务状态" })[key] || key;
+}
+async function handleCallback(update) {
+  const query = update.callback_query;
+  if (!query) return false;
+  const userId = String(query.from?.id || "");
+  const chatId = query.message?.chat?.id;
+  if (!isAdmin(userId)) {
+    await telegram("answerCallbackQuery", { callback_query_id: query.id, text: "仅管理员可使用此设置菜单。", show_alert: true });
+    return true;
+  }
+  const action = String(query.data || "");
+  await telegram("answerCallbackQuery", { callback_query_id: query.id });
+  if (!chatId) return true;
+  if (action.startsWith("setlink:")) {
+    const key = action.slice("setlink:".length);
+    if (!["main", "backup", "contact", "status"].includes(key)) return true;
+    pendingLinkSetup.set(userId, key);
+    await sendMessage(chatId, `请发送「${linkLabel(key)}」的新链接。\n支持 https://、http:// 或 tg:// 链接。\n发送 /cancel 可取消本次设置。\n\n当前链接：${data.links[key] || "尚未设置"}`);
+    return true;
+  }
+  if (action === "cancelsetup") {
+    pendingLinkSetup.delete(userId);
+    await sendMessage(chatId, "已取消当前设置。", { reply_markup: adminKeyboard() });
+    return true;
+  }
+  if (action === "preview") {
+    await sendMessage(chatId, "这是用户菜单预览：", { reply_markup: keyboard() });
+    await sendMessage(chatId, "管理员设置菜单：", { reply_markup: adminKeyboard() });
+    return true;
+  }
+  return true;
+}
 async function sendMessage(chatId, text, extra = {}) {
   return telegram("sendMessage", {
     chat_id: chatId,
@@ -105,7 +150,10 @@ function helpText() {
 }
 function adminHelp() {
   return [
+    "管理员设置：发送 /admin 打开按钮式管理菜单，点击对应入口后直接发送链接。",
+    "",
     "管理员命令：",
+    "/admin — 打开按钮式设置菜单",
     "/links — 查看当前入口",
     "/setlink main https://... — 设置官方频道",
     "/setlink backup https://... — 设置备用频道",
@@ -118,6 +166,10 @@ function adminHelp() {
   ].join("\n");
 }
 async function handleUpdate(update) {
+  if (update.callback_query) {
+    await handleCallback(update);
+    return;
+  }
   const msg = update.message;
   if (!msg?.chat || !msg?.from || typeof msg.text !== "string") return;
   const chatId = msg.chat.id;
@@ -127,11 +179,40 @@ async function handleUpdate(update) {
     await saveData();
   }
   const text = msg.text.trim();
+  if (pendingLinkSetup.has(userId)) {
+    const key = pendingLinkSetup.get(userId);
+    if (text.toLowerCase() === "/cancel") {
+      pendingLinkSetup.delete(userId);
+      await sendMessage(chatId, "已取消设置。", { reply_markup: adminKeyboard() });
+      return;
+    }
+    if (text.startsWith("/")) {
+      pendingLinkSetup.delete(userId);
+    } else {
+      if (!validUrl(text)) {
+        await sendMessage(chatId, "❌ 链接格式不正确，请发送完整链接（https://、http:// 或 tg://），或发送 /cancel 取消。");
+        return;
+      }
+      data.links[key] = text;
+      pendingLinkSetup.delete(userId);
+      await saveData();
+      await sendMessage(chatId, `✅ 已保存「${linkLabel(key)}」链接。\n用户菜单已更新，重启后仍会保留。\n\n还可以继续设置其他入口：`, { reply_markup: adminKeyboard() });
+      return;
+    }
+  }
   const [command = "", ...rest] = text.split(/\s+/);
   const cmd = command.split("@")[0].toLowerCase();
 
   if (cmd === "/start" || cmd === "/links") {
     await sendMessage(chatId, helpText(), { reply_markup: keyboard() });
+    return;
+  }
+  if (cmd === "/admin") {
+    if (!isAdmin(userId)) {
+      await sendMessage(chatId, "此设置菜单仅供管理员使用。");
+      return;
+    }
+    await sendMessage(chatId, "⚙️ 防失联机器人管理菜单\n点击要修改的入口，再直接发送新链接。", { reply_markup: adminKeyboard() });
     return;
   }
   if (cmd === "/help") {
@@ -204,7 +285,7 @@ async function poll() {
       const updates = await telegram("getUpdates", {
         offset: data.offset,
         timeout: 25,
-        allowed_updates: ["message"]
+        allowed_updates: ["message", "callback_query"]
       });
       delay = 1000;
       for (const update of updates) {
