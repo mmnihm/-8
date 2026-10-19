@@ -20,6 +20,7 @@ let data = { links: { ...DEFAULT_LINKS }, users: [], offset: 0, startedAt: Date.
 let polling = false;
 let saveQueue = Promise.resolve();
 const pendingLinkSetup = new Map();
+const pendingBroadcast = new Set();
 
 function isAdmin(id) {
   return ADMIN_IDS.has(String(id));
@@ -92,6 +93,7 @@ function adminKeyboard() {
     [{ text: "🛟 设置备用频道", callback_data: "setlink:backup" }],
     [{ text: "👩‍💻 设置客服联系", callback_data: "setlink:contact" }],
     [{ text: "📡 设置服务状态", callback_data: "setlink:status" }],
+    [{ text: "📣 发送广播公告", callback_data: "broadcast" }],
     [{ text: "👁️ 预览用户菜单", callback_data: "preview" }],
     [{ text: "❌ 取消当前设置", callback_data: "cancelsetup" }]
   ] };
@@ -118,8 +120,14 @@ async function handleCallback(update) {
     await sendMessage(chatId, `请发送「${linkLabel(key)}」的新链接。\n支持 https://、http:// 或 tg:// 链接。\n发送 /cancel 可取消本次设置。\n\n当前链接：${data.links[key] || "尚未设置"}`);
     return true;
   }
+  if (action === "broadcast") {
+    pendingBroadcast.add(userId);
+    await sendMessage(chatId, "📣 请直接发送要广播的公告内容，可以分多行。\n发送 /cancel 取消。\n\n公告会发送给已启动过机器人的用户。");
+    return true;
+  }
   if (action === "cancelsetup") {
     pendingLinkSetup.delete(userId);
+    pendingBroadcast.delete(userId);
     await sendMessage(chatId, "已取消当前设置。", { reply_markup: adminKeyboard() });
     return true;
   }
@@ -165,6 +173,27 @@ function adminHelp() {
     "/help — 查看命令"
   ].join("\n");
 }
+async function broadcastAnnouncement(chatId, announcement) {
+  const recipients = [...data.users];
+  let sent = 0, failed = 0, blocked = 0;
+  await sendMessage(chatId, `📣 开始发送，目标 ${recipients.length} 位用户。发送期间请勿关闭机器人。`);
+  for (const recipient of recipients) {
+    try {
+      await sendMessage(recipient, `📣 防失联公告\n\n${announcement}`, { reply_markup: keyboard() });
+      sent++;
+    } catch (e) {
+      failed++;
+      if ([403, 400].includes(Number(e.code))) {
+        blocked++;
+        data.users = data.users.filter(id => id !== recipient);
+      }
+      if (e.retryAfter) await new Promise(resolve => setTimeout(resolve, (e.retryAfter + 1) * 1000));
+    }
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  await saveData();
+  await sendMessage(chatId, `✅ 广播任务结束\n成功：${sent}\n失败：${failed}\n已清理不可达用户：${blocked}`);
+}
 async function handleUpdate(update) {
   if (update.callback_query) {
     await handleCallback(update);
@@ -179,6 +208,21 @@ async function handleUpdate(update) {
     await saveData();
   }
   const text = msg.text.trim();
+  if (pendingBroadcast.has(userId)) {
+    if (text.toLowerCase() === "/cancel") {
+      pendingBroadcast.delete(userId);
+      await sendMessage(chatId, "已取消广播。", { reply_markup: adminKeyboard() });
+      return;
+    }
+    if (!isAdmin(userId)) {
+      pendingBroadcast.delete(userId);
+      return;
+    }
+    pendingBroadcast.delete(userId);
+    await broadcastAnnouncement(chatId, text);
+    await sendMessage(chatId, "还可以继续管理入口或发送公告：", { reply_markup: adminKeyboard() });
+    return;
+  }
   if (pendingLinkSetup.has(userId)) {
     const key = pendingLinkSetup.get(userId);
     if (text.toLowerCase() === "/cancel") {
@@ -250,28 +294,11 @@ async function handleUpdate(update) {
   if (cmd === "/announce") {
     const announcement = rest.join(" ").trim();
     if (!announcement) {
-      await sendMessage(chatId, "用法：/announce 要发送的公告内容");
+      pendingBroadcast.add(userId);
+      await sendMessage(chatId, "📣 请直接发送要广播的公告内容，可以分多行。发送 /cancel 取消。");
       return;
     }
-    const recipients = [...data.users];
-    let sent = 0, failed = 0, blocked = 0;
-    await sendMessage(chatId, `📣 开始发送，目标 ${recipients.length} 位用户。发送期间请勿关闭机器人。`);
-    for (const recipient of recipients) {
-      try {
-        await sendMessage(recipient, `📣 防失联公告\n\n${announcement}`, { reply_markup: keyboard() });
-        sent++;
-      } catch (e) {
-        failed++;
-        if ([403, 400].includes(Number(e.code))) {
-          blocked++;
-          data.users = data.users.filter(id => id !== recipient);
-        }
-        if (e.retryAfter) await new Promise(resolve => setTimeout(resolve, (e.retryAfter + 1) * 1000));
-      }
-      await new Promise(resolve => setTimeout(resolve, 40));
-    }
-    await saveData();
-    await sendMessage(chatId, `✅ 通知任务结束\n成功：${sent}\n失败：${failed}\n已清理不可达用户：${blocked}`);
+    await broadcastAnnouncement(chatId, announcement);
     return;
   }
   await sendMessage(chatId, adminHelp());
