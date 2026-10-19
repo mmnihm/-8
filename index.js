@@ -85,6 +85,7 @@ function keyboard() {
   add("📢 官方频道", "main");
   add("🛟 备用频道", "backup");
   add("👩‍💻 联系客服", "contact");
+  add("🔗 外部状态页", "status");
   rows.push([{ text: "📡 服务器状态", callback_data: "serverstatus" }]);
   return { inline_keyboard: rows };
 }
@@ -93,6 +94,7 @@ function adminKeyboard() {
     keyboard: [
       [{ text: "📢 设置官方频道" }, { text: "🛟 设置备用频道" }],
       [{ text: "👩‍💻 设置客服联系" }, { text: "📡 查看服务器状态" }],
+      [{ text: "🔗 设置外部状态页" }],
       [{ text: "📣 发送广播公告" }, { text: "👁️ 预览用户菜单" }],
       [{ text: "▶️ 开始" }, { text: "❌ 取消当前设置" }]
     ],
@@ -269,7 +271,8 @@ async function handleUpdate(update) {
   const adminActions = {
     "📢 设置官方频道": "main",
     "🛟 设置备用频道": "backup",
-    "👩‍💻 设置客服联系": "contact"
+    "👩‍💻 设置客服联系": "contact",
+    "🔗 设置外部状态页": "status"
   };
   if (isAdmin(userId) && Object.prototype.hasOwnProperty.call(adminActions, text)) {
     pendingBroadcast.delete(userId);
