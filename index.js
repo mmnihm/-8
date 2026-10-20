@@ -205,7 +205,7 @@ async function handleCallback(update) {
     const key = action.slice("setlink:".length);
     if (!["main", "backup", "contact", "status"].includes(key)) return true;
     pendingLinkSetup.set(userId, key);
-    await sendMessage(chatId, `请发送「${linkLabel(key)}」的新链接。\n支持 https://、http:// 或 tg:// 链接。\n发送 /cancel 可取消本次设置。\n\n当前链接：${data.links[key] || "尚未设置"}`);
+    await sendMessage(chatId, `请发送「${linkLabel(key)}」的新链接。\n支持 https://、http:// 或 tg:// 链接。\n发送 /cancel 可取消本次设置。\n\n当前链接：${data.links[key] || "undefined"}`);
     return true;
   }
   if (action === "broadcast") {
@@ -327,7 +327,7 @@ async function handleUpdate(update) {
   if (isAdmin(userId) && text === "👩‍💻 客服") {
     pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
     const contact = data.links.contact;
-    await sendMessage(chatId, "👩‍💻 客服设置\\n当前客服链接：" + (contact || "尚未设置") + "\\n\\n可以直接打开当前链接，或点击下方按钮修改。", {
+    await sendMessage(chatId, "👩‍💻 客服设置\\n当前客服链接：" + (contact || "undefined") + "\\n\\n可以直接打开当前链接，或点击下方按钮修改。", {
       reply_markup: { inline_keyboard: [
         ...(contact && validUrl(contact) ? [[{ text: "打开客服入口", url: contact }]] : []),
         [{ text: "✏️ 设置客服链接", callback_data: "setlink:contact" }]
