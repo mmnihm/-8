@@ -17,7 +17,7 @@ const DEFAULT_LINKS = {
   status: process.env.STATUS_URL || ""
 };
 
-let data = { links: { ...DEFAULT_LINKS }, customButtons: [], users: [], offset: 0, startedAt: Date.now() };
+let data = { links: { ...DEFAULT_LINKS }, customButtons: [], users: [], supportMap: [], offset: 0, startedAt: Date.now() };
 let polling = false;
 let saveQueue = Promise.resolve();
 const pendingLinkSetup = new Map();
@@ -46,6 +46,7 @@ async function loadData() {
       links: { ...DEFAULT_LINKS, ...(parsed.links || {}) },
       customButtons: Array.isArray(parsed.customButtons) ? parsed.customButtons.filter(b => b && /^[a-zA-Z0-9_-]{1,16}$/.test(String(b.id)) && typeof b.label === "string" && typeof b.url === "string") : [],
       users: Array.isArray(parsed.users) ? parsed.users : [],
+      supportMap: Array.isArray(parsed.supportMap) ? parsed.supportMap.filter(x => x && Number.isFinite(Number(x.adminChatId)) && Number.isFinite(Number(x.adminMessageId)) && Number.isFinite(Number(x.userChatId))) : [],
       offset: Number(parsed.offset || 0),
       startedAt: Number(parsed.startedAt || Date.now())
     };
@@ -287,21 +288,89 @@ async function broadcastAnnouncement(chatId, announcement) {
   await saveData();
   await sendMessage(chatId, `✅ 广播任务结束\n成功：${sent}\n失败：${failed}\n已清理不可达用户：${blocked}`);
 }
+async function forwardSupportMessage(msg, userId) {
+  const userChatId = msg.chat.id;
+  const name = [msg.from.first_name, msg.from.last_name].filter(Boolean).join(" ") || "未设置";
+  const username = msg.from.username ? "@" + msg.from.username : "无";
+  let delivered = 0;
+  for (const adminId of ADMIN_IDS) {
+    try {
+      const header = await sendMessage(adminId,
+        "📩 用户客服消息\n" +
+        "姓名：" + name + "\n" +
+        "用户名：" + username + "\n" +
+        "用户 ID：" + userId + "\n\n" +
+        "请直接回复下面转发的用户消息，机器人会自动转回给用户。"
+      );
+      const forwarded = await telegram("forwardMessage", {
+        chat_id: adminId,
+        from_chat_id: userChatId,
+        message_id: msg.message_id
+      });
+      data.supportMap.push(
+        { adminChatId: String(adminId), adminMessageId: String(header.message_id), userChatId: String(userChatId) },
+        { adminChatId: String(adminId), adminMessageId: String(forwarded.message_id), userChatId: String(userChatId) }
+      );
+      delivered++;
+    } catch (e) {
+      console.error("Support forwarding failed:", e.message);
+    }
+  }
+  data.supportMap = data.supportMap.slice(-3000);
+  await saveData();
+  if (delivered) {
+    await sendMessage(userChatId, "✅ 已将你的消息转给客服，请直接在这里继续发送消息，客服回复后会通过机器人发给你。");
+  } else {
+    await sendMessage(userChatId, "暂时无法联系到客服，请稍后再试。");
+  }
+}
+async function handleAdminSupportReply(msg, userId) {
+  if (!isAdmin(userId) || !msg.reply_to_message) return false;
+  const target = data.supportMap.find(x =>
+    String(x.adminChatId) === String(msg.chat.id) &&
+    String(x.adminMessageId) === String(msg.reply_to_message.message_id)
+  );
+  if (!target) return false;
+  try {
+    await telegram("copyMessage", {
+      chat_id: Number(target.userChatId),
+      from_chat_id: msg.chat.id,
+      message_id: msg.message_id
+    });
+    await sendMessage(msg.chat.id, "✅ 已回复用户。");
+  } catch (e) {
+    await sendMessage(msg.chat.id, "❌ 回复失败：" + safeText(e.message, 300));
+  }
+  return true;
+}
 async function handleUpdate(update) {
   if (update.callback_query) {
     await handleCallback(update);
     return;
   }
   const msg = update.message;
-  if (!msg?.chat || !msg?.from || typeof msg.text !== "string") return;
+  if (!msg?.chat || !msg?.from) return;
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
+  const text = typeof msg.text === "string" ? msg.text.trim() : "";
+
+  // 管理员直接回复机器人转发的用户消息，即可将回复原样发回用户（文字、图片、文件等均支持）。
+  if (await handleAdminSupportReply(msg, userId)) return;
+
+  // 用户私聊机器人时，普通消息自动转发给所有配置的管理员。
+  if (msg.chat.type === "private" && !isAdmin(userId) && !text.startsWith("/")) {
+    if (!data.users.includes(userId)) {
+      data.users.push(userId);
+      await saveData();
+    }
+    await forwardSupportMessage(msg, userId);
+    return;
+  }
+  if (typeof msg.text !== "string") return;
   if (msg.chat.type === "private" && !data.users.includes(userId)) {
     data.users.push(userId);
     await saveData();
   }
-  const text = msg.text.trim();
-
   // 固定底部管理员键盘：先识别按钮，再处理正在等待的链接或公告。
   if (isAdmin(userId) && text === "⚙️ 设置") {
     pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
