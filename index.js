@@ -96,7 +96,6 @@ function keyboard() {
   add("🔗 外部状态页", data.links.status);
   for (const button of (data.customButtons || [])) add(button.label, button.url);
   if (linkRow.length) rows.push(linkRow);
-  rows.push([{ text: "📡 服务器状态", callback_data: "serverstatus" }]);
   return { inline_keyboard: rows };
 }
 function adminKeyboard() {
@@ -156,11 +155,6 @@ async function handleCallback(update) {
   const chatId = query.message?.chat?.id;
   const action = String(query.data || "");
 
-  if (action === "serverstatus") {
-    await telegram("answerCallbackQuery", { callback_query_id: query.id, text: "正在读取服务器状态…" });
-    if (chatId) await sendMessage(chatId, await serverStatusText(), { reply_markup: keyboard() });
-    return true;
-  }
   if (!isAdmin(userId)) {
     await telegram("answerCallbackQuery", { callback_query_id: query.id, text: "仅管理员可使用此设置菜单。", show_alert: true });
     return true;
@@ -308,13 +302,6 @@ async function handleUpdate(update) {
   }
   const text = msg.text.trim();
 
-  if (isAdmin(userId) && text === "▶️ 开始") {
-    pendingLinkSetup.delete(userId);
-    pendingBroadcast.delete(userId);
-    await sendMessage(chatId, helpText(), { reply_markup: adminKeyboard() });
-    return;
-  }
-
   // 固定底部管理员键盘：先识别按钮，再处理正在等待的链接或公告。
   if (isAdmin(userId) && text === "⚙️ 设置") {
     pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
@@ -327,7 +314,7 @@ async function handleUpdate(update) {
   if (isAdmin(userId) && text === "👩‍💻 客服") {
     pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
     const contact = data.links.contact;
-    await sendMessage(chatId, "👩‍💻 客服设置\\n当前客服链接：" + (contact || "undefined") + "\\n\\n可以直接打开当前链接，或点击下方按钮修改。", {
+    await sendMessage(chatId, "👩‍💻 客服设置\\n当前客服链接：" + (contact || "尚未设置") + "\\n\\n可以直接打开当前链接，或点击下方按钮修改。", {
       reply_markup: { inline_keyboard: [
         ...(contact && validUrl(contact) ? [[{ text: "打开客服入口", url: contact }]] : []),
         [{ text: "✏️ 设置客服链接", callback_data: "setlink:contact" }]
@@ -335,35 +322,10 @@ async function handleUpdate(update) {
     });
     return;
   }
-  if (isAdmin(userId) && text === "🔘 按钮管理") {
-    pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
-    await showButtonManager(chatId);
-    return;
-  }
-  if (isAdmin(userId) && text === "📡 查看服务器状态") {
-    pendingLinkSetup.delete(userId);
-    pendingBroadcast.delete(userId);
-    await sendMessage(chatId, await serverStatusText(), { reply_markup: adminKeyboard() });
-    return;
-  }
   if (isAdmin(userId) && (text === "📣 广播" || text === "📣 发送广播公告")) {
     pendingLinkSetup.delete(userId);
     pendingBroadcast.add(userId);
     await sendMessage(chatId, "📣 请直接发送要广播的公告内容，可以分多行。\n发送 /cancel 或点击「❌ 取消当前设置」可取消。\n\n公告会发送给已启动过机器人的用户。", { reply_markup: adminKeyboard() });
-    return;
-  }
-  if (isAdmin(userId) && text === "👁️ 预览用户菜单") {
-    pendingLinkSetup.delete(userId);
-    pendingBroadcast.delete(userId);
-    await sendMessage(chatId, "这是用户入口菜单预览：", { reply_markup: keyboard() });
-    await sendMessage(chatId, "管理员操作按钮已固定在聊天底部。", { reply_markup: adminKeyboard() });
-    return;
-  }
-  if (isAdmin(userId) && text === "❌ 取消当前设置") {
-    pendingLinkSetup.delete(userId);
-    pendingBroadcast.delete(userId);
-    pendingButtonSetup.delete(userId);
-    await sendMessage(chatId, "已取消当前操作。管理员按钮仍固定在聊天底部。", { reply_markup: adminKeyboard() });
     return;
   }
 
