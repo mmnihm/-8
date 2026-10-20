@@ -102,10 +102,7 @@ function keyboard() {
 function adminKeyboard() {
   return {
     keyboard: [
-      [{ text: "🔗 入口设置" }, { text: "🔘 按钮管理" }],
-      [{ text: "📣 发送广播公告" }, { text: "📡 查看服务器状态" }],
-      [{ text: "👁️ 预览用户菜单" }],
-      [{ text: "▶️ 开始" }, { text: "❌ 取消当前设置" }]
+      [{ text: "⚙️ 设置" }, { text: "📣 广播" }, { text: "👩‍💻 客服" }]
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
@@ -195,6 +192,13 @@ async function handleCallback(update) {
     await saveData();
     await sendMessage(chatId, `✅ 已删除按钮「${button.label}」。`, { reply_markup: adminKeyboard() });
     await showButtonManager(chatId);
+    return true;
+  }
+  if (action === "settings:links") {
+    await sendMessage(chatId, "🔗 入口链接设置\\n请选择要修改的入口：", { reply_markup: { inline_keyboard: [
+      [{ text: "📢 官方频道", callback_data: "setlink:main" }, { text: "🛟 备用频道", callback_data: "setlink:backup" }],
+      [{ text: "👩‍💻 联系客服", callback_data: "setlink:contact" }, { text: "🔗 外部状态页", callback_data: "setlink:status" }]
+    ] } });
     return true;
   }
   if (action.startsWith("setlink:")) {
@@ -312,12 +316,23 @@ async function handleUpdate(update) {
   }
 
   // 固定底部管理员键盘：先识别按钮，再处理正在等待的链接或公告。
-  if (isAdmin(userId) && text === "🔗 入口设置") {
+  if (isAdmin(userId) && text === "⚙️ 设置") {
     pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
-    await sendMessage(chatId, "🔗 入口设置\\n请选择要修改的入口：", { reply_markup: { inline_keyboard: [
-      [{ text: "📢 官方频道", callback_data: "setlink:main" }, { text: "🛟 备用频道", callback_data: "setlink:backup" }],
-      [{ text: "👩‍💻 联系客服", callback_data: "setlink:contact" }, { text: "🔗 外部状态页", callback_data: "setlink:status" }]
+    await sendMessage(chatId, "⚙️ 设置菜单\\n请选择要管理的项目：", { reply_markup: { inline_keyboard: [
+      [{ text: "🔗 入口链接设置", callback_data: "settings:links" }, { text: "🔘 自定义按钮", callback_data: "buttons:manage" }],
+      [{ text: "👁️ 预览用户菜单", callback_data: "preview" }]
     ] } });
+    return;
+  }
+  if (isAdmin(userId) && text === "👩‍💻 客服") {
+    pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
+    const contact = data.links.contact;
+    await sendMessage(chatId, "👩‍💻 客服设置\\n当前客服链接：" + (contact || "尚未设置") + "\\n\\n可以直接打开当前链接，或点击下方按钮修改。", {
+      reply_markup: { inline_keyboard: [
+        ...(contact && validUrl(contact) ? [[{ text: "打开客服入口", url: contact }]] : []),
+        [{ text: "✏️ 设置客服链接", callback_data: "setlink:contact" }]
+      ] }
+    });
     return;
   }
   if (isAdmin(userId) && text === "🔘 按钮管理") {
@@ -331,7 +346,7 @@ async function handleUpdate(update) {
     await sendMessage(chatId, await serverStatusText(), { reply_markup: adminKeyboard() });
     return;
   }
-  if (isAdmin(userId) && text === "📣 发送广播公告") {
+  if (isAdmin(userId) && (text === "📣 广播" || text === "📣 发送广播公告")) {
     pendingLinkSetup.delete(userId);
     pendingBroadcast.add(userId);
     await sendMessage(chatId, "📣 请直接发送要广播的公告内容，可以分多行。\n发送 /cancel 或点击「❌ 取消当前设置」可取消。\n\n公告会发送给已启动过机器人的用户。", { reply_markup: adminKeyboard() });
