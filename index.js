@@ -331,15 +331,25 @@ async function handleAdminSupportReply(msg, userId) {
     String(x.adminMessageId) === String(msg.reply_to_message.message_id)
   );
   if (!target) return false;
+
+  // 只有 Telegram 确认 copyMessage 成功后，才发送成功回执。
   try {
-    await telegram("copyMessage", {
+    const delivered = await telegram("copyMessage", {
       chat_id: Number(target.userChatId),
       from_chat_id: msg.chat.id,
       message_id: msg.message_id
     });
-    await sendMessage(msg.chat.id, "✅ 已回复用户。");
+    if (delivered?.message_id) {
+      await sendMessage(msg.chat.id, "✅ 回复成功：消息已发送给用户。");
+    } else {
+      await sendMessage(msg.chat.id, "❌ 回复结果未确认：Telegram 未返回成功消息编号，请检查用户对话。");
+    }
   } catch (e) {
-    await sendMessage(msg.chat.id, "❌ 回复失败：" + safeText(e.message, 300));
+    try {
+      await sendMessage(msg.chat.id, "❌ 回复失败：消息未能确认送达用户。原因：" + safeText(e.message, 250));
+    } catch (notifyError) {
+      console.error("Could not notify admin about support reply failure:", notifyError.message);
+    }
   }
   return true;
 }
