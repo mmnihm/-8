@@ -17,7 +17,22 @@ const DEFAULT_LINKS = {
   status: process.env.STATUS_URL || ""
 };
 
-let data = { links: { ...DEFAULT_LINKS }, customButtons: [], users: [], supportMap: [], offset: 0, startedAt: Date.now() };
+let data = { links: { ...DEFAULT_LINKS }, customButtons: [], users: [], supportMap: [], stats: {}, offset: 0, startedAt: Date.now() };
+function todayKey() { return new Date().toISOString().slice(0, 10); }
+function ensureStats() {
+  if (!data.stats || typeof data.stats !== "object") data.stats = {};
+  const defaults = { day: todayKey(), todayNewUsers: 0, supportReceived: 0, supportForwarded: 0, supportForwardFailed: 0, adminRepliesSent: 0, adminRepliesFailed: 0, broadcasts: 0, broadcastSent: 0, broadcastFailed: 0 };
+  for (const [key, value] of Object.entries(defaults)) if (!Number.isFinite(Number(data.stats[key]))) data.stats[key] = value;
+  if (data.stats.day !== todayKey()) { data.stats.day = todayKey(); data.stats.todayNewUsers = 0; }
+  return data.stats;
+}
+async function registerUser(userId) {
+  if (data.users.includes(String(userId))) return false;
+  data.users.push(String(userId));
+  ensureStats().todayNewUsers++;
+  await saveData();
+  return true;
+}
 let polling = false;
 let saveQueue = Promise.resolve();
 const pendingLinkSetup = new Map();
@@ -47,6 +62,7 @@ async function loadData() {
       customButtons: Array.isArray(parsed.customButtons) ? parsed.customButtons.filter(b => b && /^[a-zA-Z0-9_-]{1,16}$/.test(String(b.id)) && typeof b.label === "string" && typeof b.url === "string") : [],
       users: Array.isArray(parsed.users) ? parsed.users : [],
       supportMap: Array.isArray(parsed.supportMap) ? parsed.supportMap.filter(x => x && Number.isFinite(Number(x.adminChatId)) && Number.isFinite(Number(x.adminMessageId)) && Number.isFinite(Number(x.userChatId))) : [],
+      stats: parsed.stats && typeof parsed.stats === "object" ? parsed.stats : {},
       offset: Number(parsed.offset || 0),
       startedAt: Number(parsed.startedAt || Date.now())
     };
@@ -102,7 +118,7 @@ function keyboard() {
 function adminKeyboard() {
   return {
     keyboard: [
-      [{ text: "⚙️ 设置" }, { text: "📣 广播" }, { text: "👩‍💻 客服" }]
+      [{ text: "⚙️ 设置" }, { text: "📊 数据统计" }, { text: "📣 广播" }, { text: "👩‍💻 客服" }]
     ],
     resize_keyboard: true,
     one_time_keyboard: false,
@@ -268,6 +284,8 @@ function adminHelp() {
   ].join("\n");
 }
 async function broadcastAnnouncement(chatId, announcement) {
+  const stats = ensureStats();
+  stats.broadcasts++;
   const recipients = [...data.users];
   let sent = 0, failed = 0, blocked = 0;
   await sendMessage(chatId, `📣 开始发送，目标 ${recipients.length} 位用户。发送期间请勿关闭机器人。`);
@@ -275,8 +293,10 @@ async function broadcastAnnouncement(chatId, announcement) {
     try {
       await sendMessage(recipient, `📣 防失联公告\n\n${announcement}`, { reply_markup: keyboard() });
       sent++;
+      stats.broadcastSent++;
     } catch (e) {
       failed++;
+      stats.broadcastFailed++;
       if ([403, 400].includes(Number(e.code))) {
         blocked++;
         data.users = data.users.filter(id => id !== recipient);
@@ -292,6 +312,8 @@ async function forwardSupportMessage(msg, userId) {
   const userChatId = msg.chat.id;
   const name = [msg.from.first_name, msg.from.last_name].filter(Boolean).join(" ") || "未设置";
   const username = msg.from.username ? "@" + msg.from.username : "无";
+  const stats = ensureStats();
+  stats.supportReceived++;
   let delivered = 0;
   for (const adminId of ADMIN_IDS) {
     try {
@@ -312,7 +334,9 @@ async function forwardSupportMessage(msg, userId) {
         { adminChatId: String(adminId), adminMessageId: String(forwarded.message_id), userChatId: String(userChatId) }
       );
       delivered++;
+      stats.supportForwarded++;
     } catch (e) {
+      stats.supportForwardFailed++;
       console.error("Support forwarding failed:", e.message);
     }
   }
@@ -340,11 +364,17 @@ async function handleAdminSupportReply(msg, userId) {
       message_id: msg.message_id
     });
     if (delivered?.message_id) {
+      ensureStats().adminRepliesSent++;
+      await saveData();
       await sendMessage(msg.chat.id, "✅ 回复成功：消息已发送给用户。");
     } else {
+      ensureStats().adminRepliesFailed++;
+      await saveData();
       await sendMessage(msg.chat.id, "❌ 回复结果未确认：Telegram 未返回成功消息编号，请检查用户对话。");
     }
   } catch (e) {
+    ensureStats().adminRepliesFailed++;
+    await saveData();
     try {
       await sendMessage(msg.chat.id, "❌ 回复失败：消息未能确认送达用户。原因：" + safeText(e.message, 250));
     } catch (notifyError) {
@@ -369,18 +399,12 @@ async function handleUpdate(update) {
 
   // 用户私聊机器人时，普通消息自动转发给所有配置的管理员。
   if (msg.chat.type === "private" && !isAdmin(userId) && !text.startsWith("/")) {
-    if (!data.users.includes(userId)) {
-      data.users.push(userId);
-      await saveData();
-    }
+    await registerUser(userId);
     await forwardSupportMessage(msg, userId);
     return;
   }
   if (typeof msg.text !== "string") return;
-  if (msg.chat.type === "private" && !data.users.includes(userId)) {
-    data.users.push(userId);
-    await saveData();
-  }
+  if (msg.chat.type === "private") await registerUser(userId);
   // 固定底部管理员键盘：先识别按钮，再处理正在等待的链接或公告。
   if (isAdmin(userId) && text === "⚙️ 设置") {
     pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
@@ -388,6 +412,30 @@ async function handleUpdate(update) {
       [{ text: "🔗 入口链接设置", callback_data: "settings:links" }, { text: "🔘 自定义按钮", callback_data: "buttons:manage" }],
       [{ text: "👁️ 预览用户菜单", callback_data: "preview" }]
     ] } });
+    return;
+  }
+  if (isAdmin(userId) && text === "📊 数据统计") {
+    const stats = ensureStats();
+    const uptime = Math.floor(process.uptime());
+    const duration = `${Math.floor(uptime / 86400)} 天 ${Math.floor((uptime % 86400) / 3600)} 小时 ${Math.floor((uptime % 3600) / 60)} 分钟`;
+    const links = Object.values(data.links).filter(Boolean).length + (data.customButtons || []).length;
+    await sendMessage(chatId, [
+      "📊 防失联机器人数据统计", "",
+      `👥 累计登记用户：${data.users.length}`,
+      `🆕 今日新增用户：${stats.todayNewUsers}`,
+      `🔗 当前入口/自定义按钮：${links}`,
+      `📩 收到客服消息：${stats.supportReceived}`,
+      `📨 转交管理员成功：${stats.supportForwarded}`,
+      `⚠️ 转交管理员失败：${stats.supportForwardFailed}`,
+      `↩️ 管理员回复成功：${stats.adminRepliesSent}`,
+      `❌ 管理员回复失败：${stats.adminRepliesFailed}`,
+      `📣 广播任务次数：${stats.broadcasts}`,
+      `✅ 广播发送成功累计：${stats.broadcastSent}`,
+      `❌ 广播发送失败累计：${stats.broadcastFailed}`,
+      `⏱️ 本次进程运行：${duration}`,
+      "", "统计数据保存在数据文件中，重启后继续累计。今日新增按 UTC 日期统计。"
+    ].join("\n"), { reply_markup: adminKeyboard() });
+    await saveData();
     return;
   }
   if (isAdmin(userId) && text === "👩‍💻 客服") {
@@ -528,8 +576,9 @@ async function handleUpdate(update) {
     return;
   }
   if (cmd === "/stats") {
-    const uptime = Math.floor((Date.now() - data.startedAt) / 1000);
-    await sendMessage(chatId, `📊 运行状态\n已登记用户：${data.users.length}\n运行时间：${Math.floor(uptime / 3600)} 小时 ${Math.floor((uptime % 3600) / 60)} 分钟\n入口：${Object.values(data.links).filter(Boolean).length} 个`);
+    if (!isAdmin(userId)) { await sendMessage(chatId, "此命令仅供管理员使用。"); return; }
+    const stats = ensureStats();
+    await sendMessage(chatId, `📊 数据统计\n累计用户：${data.users.length}\n今日新增：${stats.todayNewUsers}\n客服消息：${stats.supportReceived}\n客服转发成功/失败：${stats.supportForwarded}/${stats.supportForwardFailed}\n管理员回复成功/失败：${stats.adminRepliesSent}/${stats.adminRepliesFailed}\n广播任务：${stats.broadcasts} 次\n广播发送成功/失败：${stats.broadcastSent}/${stats.broadcastFailed}\n入口及自定义按钮：${Object.values(data.links).filter(Boolean).length + (data.customButtons || []).length} 个`);
     return;
   }
   if (cmd === "/announce") {
