@@ -38,6 +38,7 @@ let saveQueue = Promise.resolve();
 const pendingLinkSetup = new Map();
 const pendingBroadcast = new Set();
 const pendingButtonSetup = new Map();
+const activeSupportTargets = new Map();
 
 function isAdmin(id) {
   return ADMIN_IDS.has(String(id));
@@ -179,6 +180,17 @@ async function handleCallback(update) {
   await telegram("answerCallbackQuery", { callback_query_id: query.id });
   if (!chatId) return true;
 
+  if (action.startsWith("support:select:")) {
+    const targetUserId = action.slice("support:select:".length);
+    if (!/^\d+$/.test(targetUserId) || !data.supportMap.some(x => String(x.userChatId) === targetUserId)) {
+      await sendMessage(chatId, "❌ 找不到这个客服用户，请让对方重新发一条消息。");
+      return true;
+    }
+    activeSupportTargets.set(userId, targetUserId);
+    pendingBroadcast.delete(userId); pendingLinkSetup.delete(userId); pendingButtonSetup.delete(userId);
+    await sendMessage(chatId, "✅ 已选中用户 " + targetUserId + "。接下来直接发送文字、图片或文件，机器人会转发给该用户。发送 /endreply 结束连续回复模式。", { reply_markup: adminKeyboard() });
+    return true;
+  }
   if (action === "buttons:manage") { await showButtonManager(chatId); return true; }
   if (action === "buttons:add") {
     pendingButtonSetup.set(userId, { phase: "label" });
@@ -386,7 +398,8 @@ async function forwardSupportMessage(msg, userId) {
         "姓名：" + name + "\n" +
         "用户名：" + username + "\n" +
         "用户 ID：" + userId + "\n\n" +
-        "请直接回复下面转发的用户消息，机器人会自动转回给用户。"
+        "可以直接回复这条消息，或点击「选中此用户」后连续发送多条回复。",
+        { reply_markup: { inline_keyboard: [[{ text: "💬 选中此用户", callback_data: "support:select:" + userId }]] } }
       );
       const forwarded = await telegram("forwardMessage", {
         chat_id: adminId,
@@ -605,6 +618,41 @@ async function handleUpdate(update) {
       return;
     }
   }
+  // 已选中客服用户时，普通消息直接发给该用户；设置流程和菜单按钮优先处理。
+  if (isAdmin(userId) && activeSupportTargets.has(userId) && !text.startsWith("/")) {
+    const activeUserId = activeSupportTargets.get(userId);
+    if (["⚙️ 设置", "📣 广播", "👩‍💻 客服", "📊 数据统计"].includes(text)) {
+      // 菜单按钮照常执行，不清除当前客服对象。
+    } else {
+      try {
+        const delivered = await telegram("copyMessage", {
+          chat_id: Number(activeUserId),
+          from_chat_id: chatId,
+          message_id: msg.message_id
+        });
+        if (delivered?.message_id) {
+          ensureStats().adminRepliesSent++;
+          await saveData();
+          await sendMessage(chatId, "✅ 回复成功：消息已发送给用户 " + activeUserId + "。");
+        } else {
+          ensureStats().adminRepliesFailed++;
+          await saveData();
+          await sendMessage(chatId, "❌ 回复结果未确认，请检查用户对话。");
+        }
+      } catch (e) {
+        ensureStats().adminRepliesFailed++;
+        await saveData();
+        await sendMessage(chatId, "❌ 回复失败：" + safeText(e.message, 250));
+      }
+      return;
+    }
+  }
+  if (isAdmin(userId) && text === "/endreply") {
+    activeSupportTargets.delete(userId);
+    await sendMessage(chatId, "已结束连续客服回复模式。", { reply_markup: adminKeyboard() });
+    return;
+  }
+
   const [command = "", ...rest] = text.split(/\s+/);
   const cmd = command.split("@")[0].toLowerCase();
 
