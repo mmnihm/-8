@@ -17,7 +17,12 @@ const DEFAULT_LINKS = {
   status: process.env.STATUS_URL || ""
 };
 
-let data = { links: { ...DEFAULT_LINKS }, customButtons: [], users: [], supportMap: [], stats: {}, offset: 0, startedAt: Date.now() };
+const DEFAULT_AUTO_REPLIES = [
+  { id: "faq_contact", keywords: ["怎么联系", "如何联系", "联系客服", "联系不到客服"], response: "可以点击下方「联系客服」入口联系管理员；如果入口无法打开，请发送你遇到的问题，我们会转交人工客服。", enabled: true },
+  { id: "faq_entry", keywords: ["入口失效", "链接失效", "频道打不开", "进不去频道", "入口打不开"], response: "如果当前入口失效，请先点击下方「备用频道」或「外部状态页」查看最新入口；仍无法解决的话，请发送消息联系人工客服。", enabled: true },
+  { id: "faq_member", keywords: ["会员问题", "会员", "续费", "购买会员", "会员权益"], response: "会员购买、续费或权益问题需要人工核实，请发送订单信息或具体问题，我们会转交客服处理。请勿在公开群聊发送支付密码等敏感信息。", enabled: true }
+];
+let data = { links: { ...DEFAULT_LINKS }, customButtons: [], autoReplies: DEFAULT_AUTO_REPLIES.map(x => ({ ...x, keywords: [...x.keywords] })), users: [], supportMap: [], stats: {}, offset: 0, startedAt: Date.now() };
 function todayKey() { return new Date().toISOString().slice(0, 10); }
 function ensureStats() {
   if (!data.stats || typeof data.stats !== "object") data.stats = {};
@@ -41,6 +46,7 @@ const pendingButtonSetup = new Map();
 const pendingBroadcastButtonSetup = new Map();
 const broadcastDraftButtons = new Map();
 const activeSupportTargets = new Map();
+const pendingAutoReplySetup = new Map();
 
 function isAdmin(id) {
   return ADMIN_IDS.has(String(id));
@@ -63,6 +69,7 @@ async function loadData() {
     data = {
       links: { ...DEFAULT_LINKS, ...(parsed.links || {}) },
       customButtons: Array.isArray(parsed.customButtons) ? parsed.customButtons.filter(b => b && /^[a-zA-Z0-9_-]{1,16}$/.test(String(b.id)) && typeof b.label === "string" && typeof b.url === "string") : [],
+      autoReplies: Array.isArray(parsed.autoReplies) ? parsed.autoReplies.filter(x => x && /^[a-zA-Z0-9_-]{1,32}$/.test(String(x.id)) && Array.isArray(x.keywords) && x.keywords.some(k => typeof k === "string" && k.trim()) && typeof x.response === "string").map(x => ({ id: String(x.id), keywords: x.keywords.map(k => String(k).trim()).filter(Boolean).slice(0, 20), response: x.response.slice(0, 3500), enabled: x.enabled !== false })) : DEFAULT_AUTO_REPLIES.map(x => ({ ...x, keywords: [...x.keywords] })),
       users: Array.isArray(parsed.users) ? [...new Set(parsed.users.map(value => String(value)).filter(id => /^\\d+$/.test(id)))] : [],
       supportMap: Array.isArray(parsed.supportMap) ? parsed.supportMap.filter(x => x && Number.isFinite(Number(x.adminChatId)) && Number.isFinite(Number(x.adminMessageId)) && Number.isFinite(Number(x.userChatId))) : [],
       stats: parsed.stats && typeof parsed.stats === "object" ? parsed.stats : {},
@@ -194,6 +201,40 @@ async function handleCallback(update) {
     return true;
   }
   if (action === "buttons:manage") { await showButtonManager(chatId); return true; }
+  if (action === "autoreplies:manage") { await showAutoReplyManager(chatId); return true; }
+  if (action === "autoreplies:add") {
+    pendingAutoReplySetup.set(userId, { phase: "keywords" });
+    pendingBroadcast.delete(userId); pendingLinkSetup.delete(userId); pendingButtonSetup.delete(userId);
+    await sendMessage(chatId, "请发送这条自动回复的关键词，多个关键词用逗号分隔。\n例如：怎么联系,联系客服,联系不到客服\n发送 /cancel 取消。");
+    return true;
+  }
+  if (action.startsWith("autoreplies:edit:")) {
+    const id = action.slice("autoreplies:edit:".length);
+    const rule = (data.autoReplies || []).find(x => x.id === id);
+    if (!rule) { await sendMessage(chatId, "找不到这条自动回复规则。"); return true; }
+    pendingAutoReplySetup.set(userId, { phase: "editKeywords", id });
+    await sendMessage(chatId, "请发送新关键词，多个关键词用逗号分隔。\n当前关键词：" + rule.keywords.join("，") + "\n发送 /cancel 取消。");
+    return true;
+  }
+  if (action.startsWith("autoreplies:delete:")) {
+    const id = action.slice("autoreplies:delete:".length);
+    const rule = (data.autoReplies || []).find(x => x.id === id);
+    if (!rule) { await sendMessage(chatId, "这条规则已经不存在。"); return true; }
+    data.autoReplies = data.autoReplies.filter(x => x.id !== id);
+    await saveData();
+    await sendMessage(chatId, "✅ 已删除自动回复规则。");
+    await showAutoReplyManager(chatId);
+    return true;
+  }
+  if (action.startsWith("autoreplies:toggle:")) {
+    const id = action.slice("autoreplies:toggle:".length);
+    const rule = (data.autoReplies || []).find(x => x.id === id);
+    if (!rule) { await sendMessage(chatId, "这条规则已经不存在。"); return true; }
+    rule.enabled = rule.enabled === false;
+    await saveData();
+    await showAutoReplyManager(chatId);
+    return true;
+  }
   if (action === "buttons:add") {
     pendingButtonSetup.set(userId, { phase: "label" });
     pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId);
@@ -303,6 +344,32 @@ async function handleCallback(update) {
   return true;
 }
 
+async function showAutoReplyManager(chatId) {
+  const rows = [[{ text: "➕ 添加问答", callback_data: "autoreplies:add" }]];
+  for (const rule of (data.autoReplies || [])) {
+    const label = (rule.enabled === false ? "⏸ " : "✅ ") + rule.keywords.slice(0, 2).join("/");
+    rows.push([
+      { text: ("✏️ " + label).slice(0, 60), callback_data: "autoreplies:edit:" + rule.id },
+      { text: rule.enabled === false ? "▶️ 启用" : "⏸ 停用", callback_data: "autoreplies:toggle:" + rule.id },
+      { text: "🗑 删除", callback_data: "autoreplies:delete:" + rule.id }
+    ]);
+  }
+  await sendMessage(chatId,
+    "🤖 常见问题自动回复\n\n用户消息包含任一关键词时，会自动发送对应回答；没有匹配到的消息会转交人工客服。\n\n规则数：" + (data.autoReplies || []).length + "\n点击规则可编辑关键词，启用/停用或删除。",
+    { reply_markup: { inline_keyboard: rows } });
+}
+function matchAutoReply(messageText) {
+  const normalized = String(messageText || "").toLocaleLowerCase().replace(/\\s+/g, "");
+  if (!normalized) return null;
+  return (data.autoReplies || []).find(rule =>
+    rule.enabled !== false &&
+    Array.isArray(rule.keywords) &&
+    rule.keywords.some(keyword => {
+      const key = String(keyword || "").toLocaleLowerCase().replace(/\\s+/g, "");
+      return key && normalized.includes(key);
+    })
+  ) || null;
+}
 async function showButtonManager(chatId) {
   const rows = [[{ text: "➕ 添加按钮", callback_data: "buttons:add" }]];
   for (const button of (data.customButtons || [])) rows.push([
@@ -504,9 +571,14 @@ async function handleUpdate(update) {
   // 管理员直接回复机器人转发的用户消息，即可将回复原样发回用户（文字、图片、文件等均支持）。
   if (!pendingBroadcast.has(userId) && await handleAdminSupportReply(msg, userId)) return;
 
-  // 用户私聊机器人时，普通消息自动转发给所有配置的管理员。
+  // 普通用户私聊优先匹配自动回复；未匹配时才转交人工客服。
   if (msg.chat.type === "private" && !isAdmin(userId) && !text.startsWith("/")) {
     await registerUser(userId);
+    const matchedReply = matchAutoReply(text);
+    if (matchedReply) {
+      await sendMessage(chatId, matchedReply.response, { reply_markup: keyboard() });
+      return;
+    }
     await forwardSupportMessage(msg, userId);
     return;
   }
@@ -561,11 +633,59 @@ async function handleUpdate(update) {
   }
   if (typeof msg.text !== "string") return;
   if (msg.chat.type === "private") await registerUser(userId);
+  if (isAdmin(userId) && pendingAutoReplySetup.has(userId)) {
+    const setup = pendingAutoReplySetup.get(userId);
+    if (text.toLowerCase() === "/cancel") {
+      pendingAutoReplySetup.delete(userId);
+      await sendMessage(chatId, "已取消自动回复设置。", { reply_markup: adminKeyboard() });
+      return;
+    }
+    if (text.startsWith("/")) {
+      await sendMessage(chatId, "请继续发送关键词或回复内容；发送 /cancel 退出设置。");
+      return;
+    }
+    if (setup.phase === "keywords" || setup.phase === "editKeywords") {
+      const keywords = text.split(/[,，、\\n]/).map(x => x.trim()).filter(Boolean);
+      if (!keywords.length || keywords.length > 20 || keywords.some(x => x.length > 50)) {
+        await sendMessage(chatId, "关键词不能为空，最多 20 个，每个最多 50 个字符，请重新发送。");
+        return;
+      }
+      setup.keywords = [...new Set(keywords)];
+      setup.phase = setup.phase === "editKeywords" ? "editResponse" : "response";
+      pendingAutoReplySetup.set(userId, setup);
+      await sendMessage(chatId, "请发送自动回复内容（最多 3500 个字符）。");
+      return;
+    }
+    if (setup.phase === "response" || setup.phase === "editResponse") {
+      const response = text.trim();
+      if (!response || response.length > 3500) {
+        await sendMessage(chatId, "回复内容不能为空，且最多 3500 个字符。请重新发送。");
+        return;
+      }
+      if (setup.phase === "response") {
+        if ((data.autoReplies || []).length >= 50) {
+          pendingAutoReplySetup.delete(userId);
+          await sendMessage(chatId, "自动回复规则最多 50 条，请先删除旧规则。");
+          return;
+        }
+        data.autoReplies.push({ id: "faq_" + Date.now().toString(36), keywords: setup.keywords, response, enabled: true });
+      } else {
+        const rule = (data.autoReplies || []).find(x => x.id === setup.id);
+        if (rule) { rule.keywords = setup.keywords; rule.response = response; rule.enabled = true; }
+      }
+      pendingAutoReplySetup.delete(userId);
+      await saveData();
+      await sendMessage(chatId, "✅ 自动回复规则已保存。", { reply_markup: adminKeyboard() });
+      await showAutoReplyManager(chatId);
+      return;
+    }
+  }
   // 固定底部管理员键盘：先识别按钮，再处理正在等待的链接或公告。
   if (isAdmin(userId) && text === "⚙️ 设置") {
-    pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
+    pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId); pendingAutoReplySetup.delete(userId);
     await sendMessage(chatId, "⚙️ 设置菜单\\n请选择要管理的项目：", { reply_markup: { inline_keyboard: [
       [{ text: "🔗 入口链接设置", callback_data: "settings:links" }, { text: "🔘 自定义按钮", callback_data: "buttons:manage" }],
+      [{ text: "🤖 常见问题自动回复", callback_data: "autoreplies:manage" }],
       [{ text: "👁️ 预览用户菜单", callback_data: "preview" }]
     ] } });
     return;
