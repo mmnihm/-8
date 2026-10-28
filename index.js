@@ -220,8 +220,31 @@ async function handleCallback(update) {
     return true;
   }
   if (action === "broadcast") {
+    pendingLinkSetup.delete(userId); pendingButtonSetup.delete(userId);
     pendingBroadcast.add(userId);
-    await sendMessage(chatId, "📣 请直接发送要广播的公告内容，可以分多行。\n发送 /cancel 取消。\n\n公告会发送给已启动过机器人的用户。");
+    await sendMessage(chatId, "📣 请发送要广播的内容（文字、图片、视频、文件等均可）。机器人会先让你确认，不会立即群发。\\n发送 /cancel 取消。", { reply_markup: adminKeyboard() });
+    return true;
+  }
+  if (action.startsWith("broadcast:confirm:")) {
+    const parts = action.split(":");
+    const sourceMessageId = Number(parts[2]);
+    const intendedAdminId = String(parts[3] || "");
+    if (intendedAdminId !== userId || !Number.isSafeInteger(sourceMessageId) || sourceMessageId <= 0) {
+      await sendMessage(chatId, "❌ 这条广播确认无效，请重新发起广播。");
+      return true;
+    }
+    if (broadcastRunning) {
+      await sendMessage(chatId, "⚠️ 当前已有广播任务正在运行，请等它完成后再试。");
+      return true;
+    }
+    // Start in the background so polling, support replies, and settings stay responsive.
+    broadcastAnnouncement(chatId, sourceMessageId).catch(e => {
+      console.error("Broadcast task escaped error handling:", e.message);
+    });
+    return true;
+  }
+  if (action === "broadcast:cancel") {
+    await sendMessage(chatId, "已取消本次广播，没有发送给用户。", { reply_markup: adminKeyboard() });
     return true;
   }
   if (action === "cancelsetup") {
@@ -283,31 +306,68 @@ function adminHelp() {
     "/help — 查看命令"
   ].join("\n");
 }
-async function broadcastAnnouncement(chatId, announcement) {
+let broadcastRunning = false;
+async function broadcastAnnouncement(adminChatId, sourceMessageId) {
+  if (broadcastRunning) {
+    await sendMessage(adminChatId, "⚠️ 当前已有广播任务正在运行，请等它完成后再发起下一次广播。");
+    return;
+  }
+  broadcastRunning = true;
   const stats = ensureStats();
   stats.broadcasts++;
-  const recipients = [...data.users];
+  const recipients = [...new Set(data.users.map(String))];
   let sent = 0, failed = 0, blocked = 0;
-  await sendMessage(chatId, `📣 开始发送，目标 ${recipients.length} 位用户。发送期间请勿关闭机器人。`);
-  for (const recipient of recipients) {
-    try {
-      await sendMessage(recipient, `📣 防失联公告\n\n${announcement}`, { reply_markup: keyboard() });
-      sent++;
-      stats.broadcastSent++;
-    } catch (e) {
-      failed++;
-      stats.broadcastFailed++;
-      if ([403, 400].includes(Number(e.code))) {
-        blocked++;
-        data.users = data.users.filter(id => id !== recipient);
+  try {
+    await sendMessage(adminChatId, `📣 已在后台开始广播，目标 ${recipients.length} 位用户。完成后会单独通知你统计结果。`);
+    for (let index = 0; index < recipients.length; index++) {
+      const recipient = recipients[index];
+      let delivered = false;
+      for (let attempt = 0; attempt < 2 && !delivered; attempt++) {
+        try {
+          await telegram("copyMessage", {
+            chat_id: Number(recipient),
+            from_chat_id: Number(adminChatId),
+            message_id: Number(sourceMessageId),
+            reply_markup: keyboard()
+          });
+          sent++;
+          stats.broadcastSent++;
+          delivered = true;
+        } catch (e) {
+          if (e.retryAfter && attempt === 0) {
+            await new Promise(resolve => setTimeout(resolve, (Number(e.retryAfter) + 1) * 1000));
+            continue;
+          }
+          // Retry one transient network/server failure, but don't loop on permanent errors.
+          if (attempt === 0 && (!e.code || Number(e.code) >= 500)) {
+            await new Promise(resolve => setTimeout(resolve, 1200));
+            continue;
+          }
+          failed++;
+          stats.broadcastFailed++;
+          if (Number(e.code) === 403) {
+            blocked++;
+            data.users = data.users.filter(id => String(id) !== recipient);
+          }
+          console.error("Broadcast delivery failed for user", recipient, ":", e.message);
+        }
       }
-      if (e.retryAfter) await new Promise(resolve => setTimeout(resolve, (e.retryAfter + 1) * 1000));
+      if ((index + 1) % 25 === 0) await saveData();
+      // Stay below Telegram's global send rate.
+      await new Promise(resolve => setTimeout(resolve, 40));
     }
-    await new Promise(resolve => setTimeout(resolve, 40));
+    await saveData();
+    await sendMessage(adminChatId, `📣 广播任务结束\n目标：${recipients.length}\n成功：${sent}\n失败：${failed}\n已清理明确封锁机器人的用户：${blocked}`);
+  } catch (e) {
+    console.error("Broadcast task failed:", e.message);
+    stats.broadcastFailed++;
+    await saveData();
+    try { await sendMessage(adminChatId, "❌ 广播任务异常：" + safeText(e.message, 250) + "\n已完成部分可能已送达，请查看统计后再决定是否重发。"); } catch {}
+  } finally {
+    broadcastRunning = false;
   }
-  await saveData();
-  await sendMessage(chatId, `✅ 广播任务结束\n成功：${sent}\n失败：${failed}\n已清理不可达用户：${blocked}`);
 }
+
 async function forwardSupportMessage(msg, userId) {
   const userChatId = msg.chat.id;
   const name = [msg.from.first_name, msg.from.last_name].filter(Boolean).join(" ") || "未设置";
@@ -401,6 +461,23 @@ async function handleUpdate(update) {
   if (msg.chat.type === "private" && !isAdmin(userId) && !text.startsWith("/")) {
     await registerUser(userId);
     await forwardSupportMessage(msg, userId);
+    return;
+  }
+  // 广播待确认阶段支持文字和媒体；不直接群发，必须管理员点击确认。
+  if (isAdmin(userId) && pendingBroadcast.has(userId)) {
+    if (text.toLowerCase() === "/cancel") {
+      pendingBroadcast.delete(userId);
+      await sendMessage(chatId, "已取消广播，没有发送给用户。", { reply_markup: adminKeyboard() });
+      return;
+    }
+    pendingBroadcast.delete(userId);
+    await sendMessage(chatId,
+      "请确认是否广播上面这条消息。确认后会在后台逐个发送，结束后通知你成功/失败数量。",
+      { reply_markup: { inline_keyboard: [[
+        { text: "✅ 确认广播", callback_data: "broadcast:confirm:" + msg.message_id + ":" + userId },
+        { text: "❌ 取消广播", callback_data: "broadcast:cancel" }
+      ]] } }
+    );
     return;
   }
   if (typeof msg.text !== "string") return;
@@ -497,21 +574,6 @@ async function handleUpdate(update) {
     }
   }
 
-  if (pendingBroadcast.has(userId)) {
-    if (text.toLowerCase() === "/cancel") {
-      pendingBroadcast.delete(userId);
-      await sendMessage(chatId, "已取消广播。", { reply_markup: adminKeyboard() });
-      return;
-    }
-    if (!isAdmin(userId)) {
-      pendingBroadcast.delete(userId);
-      return;
-    }
-    pendingBroadcast.delete(userId);
-    await broadcastAnnouncement(chatId, text);
-    await sendMessage(chatId, "还可以继续管理入口或发送公告：", { reply_markup: adminKeyboard() });
-    return;
-  }
   if (pendingLinkSetup.has(userId)) {
     const key = pendingLinkSetup.get(userId);
     if (text.toLowerCase() === "/cancel") {
@@ -588,7 +650,11 @@ async function handleUpdate(update) {
       await sendMessage(chatId, "📣 请直接发送要广播的公告内容，可以分多行。发送 /cancel 取消。");
       return;
     }
-    await broadcastAnnouncement(chatId, announcement);
+    const draft = await sendMessage(chatId, announcement);
+    await sendMessage(chatId, "请确认是否广播上面这条公告。", { reply_markup: { inline_keyboard: [[
+      { text: "✅ 确认广播", callback_data: "broadcast:confirm:" + draft.message_id + ":" + userId },
+      { text: "❌ 取消广播", callback_data: "broadcast:cancel" }
+    ]] } });
     return;
   }
   await sendMessage(chatId, adminHelp());
