@@ -464,7 +464,8 @@ async function handleUpdate(update) {
     return;
   }
   // 广播待确认阶段支持文字和媒体；不直接群发，必须管理员点击确认。
-  if (isAdmin(userId) && pendingBroadcast.has(userId)) {
+  if (isAdmin(userId) && pendingBroadcast.has(userId) &&
+      (typeof msg.text !== "string" || !["⚙️ 设置", "📣 广播", "👩‍💻 客服", "📊 数据统计"].includes(text))) {
     if (text.toLowerCase() === "/cancel") {
       pendingBroadcast.delete(userId);
       await sendMessage(chatId, "已取消广播，没有发送给用户。", { reply_markup: adminKeyboard() });
@@ -527,7 +528,7 @@ async function handleUpdate(update) {
     return;
   }
   if (isAdmin(userId) && (text === "📣 广播" || text === "📣 发送广播公告")) {
-    pendingLinkSetup.delete(userId);
+    pendingLinkSetup.delete(userId); pendingButtonSetup.delete(userId); pendingBroadcast.delete(userId);
     pendingBroadcast.add(userId);
     await sendMessage(chatId, "📣 请直接发送要广播的公告内容，可以分多行。\n发送 /cancel 或点击「❌ 取消当前设置」可取消。\n\n公告会发送给已启动过机器人的用户。", { reply_markup: adminKeyboard() });
     return;
