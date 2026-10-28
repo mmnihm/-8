@@ -439,15 +439,11 @@ async function broadcastAnnouncement(adminChatId, sourceMessageId, broadcastButt
             from_chat_id: Number(adminChatId),
             message_id: Number(sourceMessageId)
           };
-          // 广播自定义按钮与用户入口菜单分开：设置了广播按钮时，只显示本次公告按钮；
-          // 未设置广播按钮时，继续沿用原来的用户入口菜单。
+          // 广播消息只显示本次单独设置的按钮；没有设置时，不附加任何按钮。
           if (broadcastButtons.length) {
             copyPayload.reply_markup = {
               inline_keyboard: broadcastButtons.map(button => [{ text: button.label, url: button.url }])
             };
-          } else {
-            const userMenu = keyboard();
-            if (userMenu.inline_keyboard?.length) copyPayload.reply_markup = userMenu;
           }
           await telegram("copyMessage", copyPayload);
           sent++;
