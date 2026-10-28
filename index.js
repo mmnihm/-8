@@ -653,7 +653,7 @@ async function handleUpdate(update) {
       return;
     }
     if (text.startsWith("/")) {
-      await sendMessage(chatId, "请继续发送关键词或回复内容；发送 /cancel 退出设置。");
+      await sendMessage(chatId, "请继续发送按钮名称或自动回复内容；发送 /cancel 退出设置。");
       return;
     }
     if (setup.phase === "label" || setup.phase === "editLabel") {
