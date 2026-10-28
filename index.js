@@ -60,7 +60,7 @@ async function loadData() {
     data = {
       links: { ...DEFAULT_LINKS, ...(parsed.links || {}) },
       customButtons: Array.isArray(parsed.customButtons) ? parsed.customButtons.filter(b => b && /^[a-zA-Z0-9_-]{1,16}$/.test(String(b.id)) && typeof b.label === "string" && typeof b.url === "string") : [],
-      users: Array.isArray(parsed.users) ? parsed.users : [],
+      users: Array.isArray(parsed.users) ? [...new Set(parsed.users.map(value => String(value)).filter(id => /^\\d+$/.test(id)))] : [],
       supportMap: Array.isArray(parsed.supportMap) ? parsed.supportMap.filter(x => x && Number.isFinite(Number(x.adminChatId)) && Number.isFinite(Number(x.adminMessageId)) && Number.isFinite(Number(x.userChatId))) : [],
       stats: parsed.stats && typeof parsed.stats === "object" ? parsed.stats : {},
       offset: Number(parsed.offset || 0),
@@ -206,6 +206,7 @@ async function handleCallback(update) {
     return true;
   }
   if (action === "settings:links") {
+    pendingLinkSetup.delete(userId); pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
     await sendMessage(chatId, "🔗 入口链接设置\\n请选择要修改的入口：", { reply_markup: { inline_keyboard: [
       [{ text: "📢 官方频道", callback_data: "setlink:main" }, { text: "🛟 备用频道", callback_data: "setlink:backup" }],
       [{ text: "👩‍💻 联系客服", callback_data: "setlink:contact" }, { text: "🔗 外部状态页", callback_data: "setlink:status" }]
@@ -215,6 +216,7 @@ async function handleCallback(update) {
   if (action.startsWith("setlink:")) {
     const key = action.slice("setlink:".length);
     if (!["main", "backup", "contact", "status"].includes(key)) return true;
+    pendingBroadcast.delete(userId); pendingButtonSetup.delete(userId);
     pendingLinkSetup.set(userId, key);
     await sendMessage(chatId, `请发送「${linkLabel(key)}」的新链接。\n支持 https://、http:// 或 tg:// 链接。\n发送 /cancel 可取消本次设置。\n\n当前链接：${data.links[key] || "undefined"}`);
     return true;
@@ -473,15 +475,20 @@ async function handleUpdate(update) {
       await sendMessage(chatId, "已取消广播，没有发送给用户。", { reply_markup: adminKeyboard() });
       return;
     }
-    pendingBroadcast.delete(userId);
-    await sendMessage(chatId,
+    // Other slash commands cancel the draft mode and continue through normal command handling.
+    if (text.startsWith("/")) {
+      pendingBroadcast.delete(userId);
+    } else {
+      pendingBroadcast.delete(userId);
+      await sendMessage(chatId,
       "请确认是否广播上面这条消息。确认后会在后台逐个发送，结束后通知你成功/失败数量。",
       { reply_markup: { inline_keyboard: [[
         { text: "✅ 确认广播", callback_data: "broadcast:confirm:" + msg.message_id + ":" + userId },
         { text: "❌ 取消广播", callback_data: "broadcast:cancel" }
       ]] } }
-    );
-    return;
+      );
+      return;
+    }
   }
   if (typeof msg.text !== "string") return;
   if (msg.chat.type === "private") await registerUser(userId);
