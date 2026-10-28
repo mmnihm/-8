@@ -459,7 +459,7 @@ async function handleUpdate(update) {
   const text = typeof msg.text === "string" ? msg.text.trim() : "";
 
   // 管理员直接回复机器人转发的用户消息，即可将回复原样发回用户（文字、图片、文件等均支持）。
-  if (await handleAdminSupportReply(msg, userId)) return;
+  if (!pendingBroadcast.has(userId) && await handleAdminSupportReply(msg, userId)) return;
 
   // 用户私聊机器人时，普通消息自动转发给所有配置的管理员。
   if (msg.chat.type === "private" && !isAdmin(userId) && !text.startsWith("/")) {
