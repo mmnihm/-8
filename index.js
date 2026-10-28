@@ -324,12 +324,14 @@ async function broadcastAnnouncement(adminChatId, sourceMessageId) {
       let delivered = false;
       for (let attempt = 0; attempt < 2 && !delivered; attempt++) {
         try {
-          await telegram("copyMessage", {
+          const copyPayload = {
             chat_id: Number(recipient),
             from_chat_id: Number(adminChatId),
-            message_id: Number(sourceMessageId),
-            reply_markup: keyboard()
-          });
+            message_id: Number(sourceMessageId)
+          };
+          const userMenu = keyboard();
+          if (userMenu.inline_keyboard.length) copyPayload.reply_markup = userMenu;
+          await telegram("copyMessage", copyPayload);
           sent++;
           stats.broadcastSent++;
           delivered = true;
