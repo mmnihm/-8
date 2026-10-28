@@ -121,13 +121,24 @@ function keyboard() {
   add("🛟 备用频道", data.links.backup);
   add("👩‍💻 联系客服", data.links.contact);
   add("🔗 外部状态页", data.links.status);
-  for (const button of (data.customButtons || [])) add(button.label, button.url);
+  // 自定义按钮改为聊天窗口底部固定键盘，不再放在消息下方的内联菜单。
   if (linkRow.length) rows.push(linkRow);
   return { inline_keyboard: rows };
 }
 function userReplyKeyboard() {
-  const labels = (data.autoReplies || []).filter(rule => rule && rule.enabled !== false)
-    .map(rule => String(rule.buttonLabel || rule.keywords?.[0] || "常见问题").trim().slice(0, 32)).filter(Boolean);
+  const labels = [];
+  const seen = new Set();
+  const addLabel = value => {
+    const label = String(value || "").trim().slice(0, 32);
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    labels.push(label);
+  };
+  // 管理员自定义的链接按钮与常见问题按钮统一显示在底部固定键盘。
+  for (const button of (data.customButtons || [])) addLabel(button.label);
+  for (const rule of (data.autoReplies || [])) {
+    if (rule && rule.enabled !== false) addLabel(rule.buttonLabel || rule.keywords?.[0] || "常见问题");
+  }
   const rows = [];
   for (let i = 0; i < labels.length; i += 2) rows.push(labels.slice(i, i + 2).map(text => ({ text })));
   rows.push([{ text: "👩‍💻 联系人工客服" }]);
@@ -386,7 +397,7 @@ async function showButtonManager(chatId) {
     { text: "🗑 删除", callback_data: `buttons:delete:${button.id}` }
   ]);
   await sendMessage(chatId,
-    "🔘 自定义按钮管理\n\n添加：设置按钮名称和网址。\n修改：可以修改名称及网址。\n删除：立即从用户菜单移除。\n\n自定义按钮会显示在用户入口菜单中，重启后仍会保留。",
+    "🔘 自定义按钮管理\n\n添加：设置按钮名称和网址。\n修改：可以修改名称及网址。\n删除：立即从用户菜单移除。\n\n自定义按钮会显示在用户聊天窗口底部固定键盘；用户点击后，机器人会发送对应的打开链接按钮。重启后仍会保留。",
     { reply_markup: { inline_keyboard: rows } });
 }
 
@@ -586,6 +597,21 @@ async function handleUpdate(update) {
   // 普通用户私聊优先匹配自动回复；未匹配时才转交人工客服。
   if (msg.chat.type === "private" && !isAdmin(userId) && !text.startsWith("/")) {
     await registerUser(userId);
+    const customButton = (data.customButtons || []).find(button =>
+      String(button.label || "").trim().toLocaleLowerCase() === text.toLocaleLowerCase()
+    );
+    if (customButton) {
+      if (validUrl(customButton.url)) {
+        await sendMessage(chatId, "🔗 " + customButton.label + "\\n点击下方按钮打开：", {
+          reply_markup: {
+            inline_keyboard: [[{ text: "打开 " + customButton.label, url: customButton.url }]]
+          }
+        });
+      } else {
+        await sendMessage(chatId, "❌ 这个入口链接暂时无效，请联系人工客服。", { reply_markup: userReplyKeyboard() });
+      }
+      return;
+    }
     const matchedReply = matchAutoReply(text);
     if (matchedReply) {
       await sendMessage(chatId, matchedReply.response, { reply_markup: userReplyKeyboard() });
@@ -783,7 +809,7 @@ async function handleUpdate(update) {
       }
       pendingButtonSetup.delete(userId);
       await saveData();
-      await sendMessage(chatId, "✅ 按钮已保存，用户菜单已更新。", { reply_markup: adminKeyboard() });
+      await sendMessage(chatId, "✅ 按钮已保存。用户重新发送 /start 后会在聊天窗口底部看到固定键盘按钮。", { reply_markup: adminKeyboard() });
       await showButtonManager(chatId);
       return;
     }
