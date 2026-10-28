@@ -38,6 +38,8 @@ let saveQueue = Promise.resolve();
 const pendingLinkSetup = new Map();
 const pendingBroadcast = new Set();
 const pendingButtonSetup = new Map();
+const pendingBroadcastButtonSetup = new Map();
+const broadcastDraftButtons = new Map();
 const activeSupportTargets = new Map();
 
 function isAdmin(id) {
@@ -239,6 +241,28 @@ async function handleCallback(update) {
     await sendMessage(chatId, "📣 请发送要广播的内容（文字、图片、视频、文件等均可）。机器人会先让你确认，不会立即群发。\\n发送 /cancel 取消。", { reply_markup: adminKeyboard() });
     return true;
   }
+  if (action.startsWith("broadcast:button:add:")) {
+    const sourceMessageId = action.slice("broadcast:button:add:".length);
+    pendingBroadcastButtonSetup.set(userId, { sourceMessageId, phase: "label" });
+    await sendMessage(chatId, "请发送按钮名称（最多 32 个字符）。\n发送 /cancel 取消添加按钮。");
+    return true;
+  }
+  if (action.startsWith("broadcast:button:skip:")) {
+    const sourceMessageId = action.slice("broadcast:button:skip:".length);
+    await sendMessage(chatId, "将不添加按钮，请确认广播：", { reply_markup: { inline_keyboard: [[{ text: "✅ 确认广播", callback_data: "broadcast:confirm:" + sourceMessageId + ":" + userId }, { text: "❌ 取消广播", callback_data: "broadcast:cancel" }]] } });
+    return true;
+  }
+  if (action.startsWith("broadcast:button:more:")) {
+    const sourceMessageId = action.slice("broadcast:button:more:".length);
+    pendingBroadcastButtonSetup.set(userId, { sourceMessageId, phase: "label" });
+    await sendMessage(chatId, "请发送下一个按钮名称（最多 32 个字符）。");
+    return true;
+  }
+  if (action.startsWith("broadcast:button:done:")) {
+    const sourceMessageId = action.slice("broadcast:button:done:".length);
+    await sendMessage(chatId, "按钮设置完成，请确认广播：", { reply_markup: { inline_keyboard: [[{ text: "✅ 确认广播", callback_data: "broadcast:confirm:" + sourceMessageId + ":" + userId }, { text: "❌ 取消广播", callback_data: "broadcast:cancel" }]] } });
+    return true;
+  }
   if (action.startsWith("broadcast:confirm:")) {
     const parts = action.split(":");
     const sourceMessageId = Number(parts[2]);
@@ -252,12 +276,17 @@ async function handleCallback(update) {
       return true;
     }
     // Start in the background so polling, support replies, and settings stay responsive.
-    broadcastAnnouncement(chatId, sourceMessageId).catch(e => {
+    const draftKey = userId + ":" + sourceMessageId;
+    const draftButtons = broadcastDraftButtons.get(draftKey) || [];
+    broadcastDraftButtons.delete(draftKey);
+    broadcastAnnouncement(chatId, sourceMessageId, draftButtons).catch(e => {
       console.error("Broadcast task escaped error handling:", e.message);
     });
     return true;
   }
   if (action === "broadcast:cancel") {
+    for (const key of [...broadcastDraftButtons.keys()]) if (key.startsWith(userId + ":")) broadcastDraftButtons.delete(key);
+    pendingBroadcastButtonSetup.delete(userId);
     await sendMessage(chatId, "已取消本次广播，没有发送给用户。", { reply_markup: adminKeyboard() });
     return true;
   }
@@ -321,7 +350,7 @@ function adminHelp() {
   ].join("\n");
 }
 let broadcastRunning = false;
-async function broadcastAnnouncement(adminChatId, sourceMessageId) {
+async function broadcastAnnouncement(adminChatId, sourceMessageId, broadcastButtons = []) {
   if (broadcastRunning) {
     await sendMessage(adminChatId, "⚠️ 当前已有广播任务正在运行，请等它完成后再发起下一次广播。");
     return;
@@ -344,7 +373,8 @@ async function broadcastAnnouncement(adminChatId, sourceMessageId) {
             message_id: Number(sourceMessageId)
           };
           const userMenu = keyboard();
-          if (userMenu.inline_keyboard.length) copyPayload.reply_markup = userMenu;
+          const combinedRows = [...(broadcastButtons.length ? broadcastButtons.map(button => [{ text: button.label, url: button.url }]) : []), ...(userMenu.inline_keyboard || [])];
+          if (combinedRows.length) copyPayload.reply_markup = { inline_keyboard: combinedRows };
           await telegram("copyMessage", copyPayload);
           sent++;
           stats.broadcastSent++;
@@ -493,15 +523,41 @@ async function handleUpdate(update) {
       pendingBroadcast.delete(userId);
     } else {
       pendingBroadcast.delete(userId);
+      broadcastDraftButtons.set(userId + ":" + msg.message_id, []);
       await sendMessage(chatId,
-      "请确认是否广播上面这条消息。确认后会在后台逐个发送，结束后通知你成功/失败数量。",
+      "📣 公告已收到。可以给公告添加一个或多个网址按钮，也可以直接跳过。",
       { reply_markup: { inline_keyboard: [[
-        { text: "✅ 确认广播", callback_data: "broadcast:confirm:" + msg.message_id + ":" + userId },
-        { text: "❌ 取消广播", callback_data: "broadcast:cancel" }
+        { text: "➕ 添加按钮", callback_data: "broadcast:button:add:" + msg.message_id },
+        { text: "⏭ 不添加按钮", callback_data: "broadcast:button:skip:" + msg.message_id }
       ]] } }
       );
       return;
     }
+  }
+  if (isAdmin(userId) && pendingBroadcastButtonSetup.has(userId)) {
+    const setup = pendingBroadcastButtonSetup.get(userId);
+    if (text.toLowerCase() === "/cancel") {
+      pendingBroadcastButtonSetup.delete(userId);
+      await sendMessage(chatId, "已取消添加广播按钮。", { reply_markup: { inline_keyboard: [[{ text: "➕ 继续添加按钮", callback_data: "broadcast:button:add:" + setup.sourceMessageId }, { text: "✅ 完成按钮设置", callback_data: "broadcast:button:done:" + setup.sourceMessageId }]] } });
+      return;
+    }
+    if (typeof msg.text !== "string") { await sendMessage(chatId, "按钮名称和网址请发送文字。"); return; }
+    if (setup.phase === "label") {
+      const label = text.trim();
+      if (!label || label.startsWith("/") || label.length > 32) { await sendMessage(chatId, "按钮名称不能为空且最多 32 个字符，请重新发送。"); return; }
+      setup.label = label; setup.phase = "url"; pendingBroadcastButtonSetup.set(userId, setup);
+      await sendMessage(chatId, "请发送按钮要打开的网址（https://、http:// 或 tg://）。");
+      return;
+    }
+    const url = text.trim();
+    if (!validUrl(url)) { await sendMessage(chatId, "❌ 网址格式不正确，请发送 https://、http:// 或 tg:// 链接。"); return; }
+    const key = userId + ":" + setup.sourceMessageId;
+    const buttons = broadcastDraftButtons.get(key) || [];
+    if (buttons.length >= 8) { pendingBroadcastButtonSetup.delete(userId); await sendMessage(chatId, "最多添加 8 个按钮。", { reply_markup: { inline_keyboard: [[{ text: "✅ 完成按钮设置", callback_data: "broadcast:button:done:" + setup.sourceMessageId }]] } }); return; }
+    buttons.push({ label: setup.label, url }); broadcastDraftButtons.set(key, buttons);
+    pendingBroadcastButtonSetup.delete(userId);
+    await sendMessage(chatId, "✅ 已添加按钮「" + setup.label + "」。当前 " + buttons.length + " 个按钮。", { reply_markup: { inline_keyboard: [[{ text: "➕ 再添加一个", callback_data: "broadcast:button:more:" + setup.sourceMessageId }, { text: "✅ 完成设置", callback_data: "broadcast:button:done:" + setup.sourceMessageId }]] } });
+    return;
   }
   if (typeof msg.text !== "string") return;
   if (msg.chat.type === "private") await registerUser(userId);
